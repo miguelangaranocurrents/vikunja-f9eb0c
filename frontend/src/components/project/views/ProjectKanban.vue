@@ -354,7 +354,10 @@ const DRAG_OPTIONS = {
 	dragClass: 'task-dragging',
 	delayOnTouchOnly: true,
 	delay: 1000,
-	// auto-scroll the board when dragging close to its edges, so off-screen buckets can be reached
+	// Auto-scroll the board when dragging close to its edges, so off-screen buckets can be reached.
+	// With native drag & drop Sortable leaves the closest scroll container (the board) to the
+	// browser's own drag auto-scroll, which barely triggers; let Sortable scroll it instead.
+	forceAutoScrollFallback: true,
 	scrollSensitivity: 100,
 	scrollSpeed: 20,
 } as const
