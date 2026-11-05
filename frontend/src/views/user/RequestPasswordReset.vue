@@ -1,0 +1,88 @@
+<template>
+	<div>
+		<Message
+			v-if="errorMsg"
+			variant="danger"
+			class="mbe-4"
+		>
+			{{ errorMsg }}
+		</Message>
+		<div
+			v-if="isSuccess"
+			class="has-text-centered mbe-4"
+		>
+			<Message variant="success">
+				{{ $t('user.auth.resetPasswordSuccess') }}
+			</Message>
+			<XButton
+				:to="{ name: 'user.login' }"
+				class="mbs-4"
+			>
+				{{ $t('user.auth.login') }}
+			</XButton>
+		</div>
+		<form
+			v-if="!isSuccess"
+			@submit.prevent="requestPasswordReset"
+		>
+			<FormField
+				id="email"
+				v-model="email"
+				v-focus
+				:label="$t('user.auth.email')"
+				name="email"
+				:placeholder="$t('user.auth.emailPlaceholder')"
+				required
+				type="email"
+				autocomplete="email"
+			/>
+
+			<div class="is-flex">
+				<XButton
+					type="submit"
+					:loading="passwordResetMutation.isPending.value"
+				>
+					{{ $t('user.auth.resetPasswordAction') }}
+				</XButton>
+				<XButton
+					:to="{ name: 'user.login' }"
+					variant="secondary"
+				>
+					{{ $t('user.auth.login') }}
+				</XButton>
+			</div>
+		</form>
+	</div>
+</template>
+
+<script setup lang="ts">
+import {ref} from 'vue'
+
+import {useRequestPasswordResetMutation} from '@/client/queries/passwords'
+import {isRequestContextAbort} from '@/client/requestContext'
+import Message from '@/components/misc/Message.vue'
+import {getErrorText} from '@/message'
+import FormField from '@/components/input/FormField.vue'
+
+const passwordResetMutation = useRequestPasswordResetMutation()
+const email = ref('')
+const errorMsg = ref('')
+const isSuccess = ref(false)
+
+async function requestPasswordReset() {
+	errorMsg.value = ''
+	try {
+		await passwordResetMutation.mutateAsync({email: email.value})
+		isSuccess.value = true
+	} catch (e) {
+		if (isRequestContextAbort(e)) return
+		errorMsg.value = getErrorText(e)
+	}
+}
+</script>
+
+<style scoped>
+.button {
+	margin: 0 0.4rem 0 0;
+}
+</style>

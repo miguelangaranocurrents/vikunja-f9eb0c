@@ -1,0 +1,252 @@
+// Vikunja is a to-do list application to facilitate your life.
+// Copyright 2018-present Vikunja and contributors. All rights reserved.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package apiv2
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+
+	"code.vikunja.io/api/pkg/config"
+	"code.vikunja.io/api/pkg/db"
+	"code.vikunja.io/api/pkg/events"
+	"code.vikunja.io/api/pkg/models"
+	webfiles "code.vikunja.io/api/pkg/web/files"
+	"code.vikunja.io/api/pkg/web/handler"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humaecho"
+)
+
+// models.TaskAttachment.ReadAll returns []*models.TaskAttachment.
+type taskAttachmentListBody struct {
+	Body Paginated[*models.TaskAttachment]
+}
+
+type taskAttachmentUploadInput struct {
+	TaskID int64 `path:"task" doc:"The id of the task to attach the files to."`
+	// Accept any upload; the byte-level mime detection happens in files.CreateWithSession,
+	// so there is no part content-type allow-list to enforce here (unlike the avatar endpoint).
+	RawBody huma.MultipartFormFiles[struct {
+		Files []huma.FormFile `form:"files" required:"true" doc:"One or more files to upload as task attachments. Send multiple parts under the same \"files\" field to upload several at once."`
+	}]
+}
+
+type taskAttachmentUploadBody struct {
+	Body *webfiles.AttachmentUploadResult
+}
+
+// RegisterTaskAttachmentRoutes wires task-attachment list/upload/download/delete onto
+// the Huma API. The whole resource is gated by the service.enabletaskattachments config
+// flag; the check runs here (not at init()) because RegisterAll fires after config loads.
+func RegisterTaskAttachmentRoutes(api huma.API) {
+	if !config.ServiceEnableTaskAttachments.GetBool() {
+		return
+	}
+
+	tags := []string{"task"}
+
+	Register(api, huma.Operation{
+		OperationID: "task-attachments-list",
+		Summary:     "List a task's attachments",
+		Description: "Returns the attachment metadata for one task, paginated. Requires read access to the task. The file bytes are not included; fetch them from the download endpoint.",
+		Method:      http.MethodGet,
+		Path:        "/tasks/{task}/attachments",
+		Tags:        tags,
+	}, taskAttachmentsList)
+
+	Register(api, withUploadLimits(huma.Operation{
+		OperationID: "task-attachments-upload",
+		Summary:     "Upload task attachments",
+		Description: "Uploads one or more files as attachments to a task via multipart/form-data under the \"files\" field. Requires write access to the task. Each file is processed independently: a file that fails (for example, exceeding the configured size limit) is reported in the errors list while the others still succeed, so the request returns 201 even on a partial upload. The max size per file is the server's configured file size limit.",
+		Method:      http.MethodPost,
+		Path:        "/tasks/{task}/attachments",
+		Tags:        tags,
+	}), taskAttachmentsUpload)
+
+	Register(api, huma.Operation{
+		OperationID: "task-attachments-download",
+		Summary:     "Download a task attachment",
+		Description: "Returns the raw bytes of one attachment. Requires read access to the task. For a downscaled image, use the preview endpoint.",
+		Method:      http.MethodGet,
+		Path:        "/tasks/{task}/attachments/{attachment}",
+		Tags:        tags,
+		// Spell out the binary response; a bare []byte Body would otherwise be
+		// modeled as a base64 JSON string instead of binary file data.
+		Responses: map[string]*huma.Response{
+			"default": defaultErrorResponse(api),
+			"200": {
+				Description: "The attachment file bytes. The Content-Type header carries the file's mime type.",
+				Content: map[string]*huma.MediaType{
+					"application/octet-stream": {
+						Schema: &huma.Schema{Type: huma.TypeString, Format: "binary"},
+					},
+				},
+			},
+		},
+	}, taskAttachmentsDownload)
+
+	Register(api, huma.Operation{
+		OperationID: "task-attachments-preview",
+		Summary:     "Get a preview of a task attachment",
+		Description: "Returns a downscaled preview of an image attachment, as a JPEG or, when the image has transparency, as a PNG. Requires read access to the task. Never returns the original: when no preview can be made of the attachment (not an image, undecodable, or too large) the request fails with 422 and code 4038. Fails with 503 and code 4037 when the server is too busy generating other previews.",
+		Method:      http.MethodGet,
+		Path:        "/tasks/{task}/attachments/{attachment}/preview",
+		Tags:        tags,
+		Responses: map[string]*huma.Response{
+			"default": defaultErrorResponse(api),
+			"200": {
+				Description: "The preview image bytes.",
+				Content: map[string]*huma.MediaType{
+					"image/jpeg": {
+						Schema: &huma.Schema{Type: huma.TypeString, Format: "binary"},
+					},
+					"image/png": {
+						Schema: &huma.Schema{Type: huma.TypeString, Format: "binary"},
+					},
+				},
+			},
+			"422": {
+				Description: "The attachment has no preview (code 4038), or size is missing or invalid.",
+				Content:     defaultErrorResponse(api).Content,
+			},
+		},
+	}, taskAttachmentsPreview)
+
+	Register(api, huma.Operation{
+		OperationID: "task-attachments-delete",
+		Summary:     "Delete a task attachment",
+		Description: "Deletes one attachment and its underlying file. Requires write access to the task. The attachment must belong to the task in the path.",
+		Method:      http.MethodDelete,
+		Path:        "/tasks/{task}/attachments/{attachment}",
+		Tags:        tags,
+	}, taskAttachmentsDelete)
+}
+
+func init() { AddRouteRegistrar(RegisterTaskAttachmentRoutes) }
+
+func taskAttachmentsList(ctx context.Context, in *struct {
+	TaskID int64 `path:"task" doc:"The id of the task whose attachments to list."`
+	ListParams
+}) (*taskAttachmentListBody, error) {
+	a, err := authFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result, _, total, err := handler.DoReadAll(ctx, &models.TaskAttachment{TaskID: in.TaskID}, a, in.Q, in.Page, in.PerPage)
+	if err != nil {
+		return nil, translateDomainError(err)
+	}
+	items, ok := result.([]*models.TaskAttachment)
+	if !ok {
+		return nil, fmt.Errorf("taskAttachments.ReadAll returned unexpected type %T (expected []*models.TaskAttachment)", result)
+	}
+	return &taskAttachmentListBody{Body: NewPaginated(items, total, in.Page, in.PerPage)}, nil
+}
+
+// taskAttachmentsUpload owns auth, the session and the permission check because
+// there is no handler.Do* for multipart uploads (see the api-v2-routes skill's
+// "Non-CRUDable / custom routes" section).
+func taskAttachmentsUpload(ctx context.Context, in *taskAttachmentUploadInput) (*taskAttachmentUploadBody, error) {
+	a, err := authFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	s := db.NewSession()
+	defer s.Close()
+
+	formFiles := in.RawBody.Data().Files
+	uploads := make([]*models.AttachmentToUpload, 0, len(formFiles))
+	for _, file := range formFiles {
+		uploads = append(uploads, &models.AttachmentToUpload{Reader: file, Filename: file.Filename, Size: uint64(file.Size)})
+	}
+
+	success, failures, err := models.UploadTaskAttachments(s, a, in.TaskID, uploads)
+	if err != nil {
+		_ = s.Rollback()
+		events.CleanupPending(s)
+		return nil, translateDomainError(err)
+	}
+
+	if err := s.Commit(); err != nil {
+		_ = s.Rollback()
+		events.CleanupPending(s)
+		return nil, translateDomainError(err)
+	}
+	events.DispatchPending(ctx, s)
+
+	return &taskAttachmentUploadBody{Body: webfiles.BuildUploadResult(success, failures)}, nil
+}
+
+// taskAttachmentsDownload exists because no handler.Do* fits a file body; bytes
+// stream from the StreamResponse callback without buffering — attachments can be large.
+func taskAttachmentsDownload(ctx context.Context, in *struct {
+	TaskID       int64 `path:"task" doc:"The id of the task the attachment belongs to."`
+	AttachmentID int64 `path:"attachment" doc:"The id of the attachment to download."`
+}) (*huma.StreamResponse, error) {
+	a, err := authFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	file, err := models.GetTaskAttachmentForDownload(a, in.TaskID, in.AttachmentID)
+	if err != nil {
+		return nil, translateDomainError(err)
+	}
+
+	// Reader is independent of the session; stays valid for the StreamResponse callback.
+	return &huma.StreamResponse{Body: func(hctx huma.Context) {
+		defer func() { _ = file.File.Close() }()
+		c := humaecho.Unwrap(hctx)
+		webfiles.WriteFileDownload((*c).Response(), (*c).Request(), file)
+	}}, nil
+}
+
+func taskAttachmentsPreview(ctx context.Context, in *struct {
+	TaskID       int64  `path:"task" doc:"The id of the task the attachment belongs to."`
+	AttachmentID int64  `path:"attachment" doc:"The id of the attachment to preview."`
+	Size         string `query:"size" required:"true" enum:"sm,md,lg,xl" doc:"The width of the preview: sm=100px, md=200px, lg=400px, xl=800px. Smaller images are not upscaled."`
+}) (*huma.StreamResponse, error) {
+	a, err := authFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	preview, err := models.GetTaskAttachmentPreview(ctx, a, in.TaskID, in.AttachmentID, models.GetPreviewSizeFromString(in.Size))
+	if err != nil {
+		return nil, translateDomainError(err)
+	}
+
+	return &huma.StreamResponse{Body: func(hctx huma.Context) {
+		webfiles.WriteAttachmentPreview((*humaecho.Unwrap(hctx)).Response(), preview)
+	}}, nil
+}
+
+func taskAttachmentsDelete(ctx context.Context, in *struct {
+	TaskID       int64 `path:"task" doc:"The id of the task the attachment belongs to."`
+	AttachmentID int64 `path:"attachment" doc:"The id of the attachment to delete."`
+}) (*emptyBody, error) {
+	a, err := authFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := handler.DoDelete(ctx, &models.TaskAttachment{ID: in.AttachmentID, TaskID: in.TaskID}, a); err != nil {
+		return nil, translateDomainError(err)
+	}
+	return &emptyBody{}, nil
+}

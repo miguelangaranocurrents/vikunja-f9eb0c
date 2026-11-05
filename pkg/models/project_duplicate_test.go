@@ -1,0 +1,271 @@
+// Vikunja is a to-do list application to facilitate your life.
+// Copyright 2018-present Vikunja and contributors. All rights reserved.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package models
+
+import (
+	"testing"
+
+	"code.vikunja.io/api/pkg/db"
+	"code.vikunja.io/api/pkg/files"
+	"code.vikunja.io/api/pkg/user"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"xorm.io/xorm"
+)
+
+func TestProjectDuplicate(t *testing.T) {
+	t.Run("duplicate project", func(t *testing.T) {
+		testProjectDuplicate(t, 1, 1)
+	})
+
+	t.Run("duplicate project with uploaded background", func(t *testing.T) {
+		// Project 35 has a background_file_id of 1, which is NOT an Unsplash photo
+		// This tests the fix for issue #1745 where duplicating a project with an uploaded
+		// (non-Unsplash) background would fail with an internal server error
+		testProjectDuplicate(t, 35, 6)
+	})
+
+	t.Run("buckets above the per-view cap are copied", func(t *testing.T) {
+		files.InitTestFileFixtures(t)
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		u := &user.User{ID: 1}
+		// Inserted directly: buckets from before the cap.
+		for range maxBucketsPerView {
+			_, err := s.Insert(&Bucket{Title: "pre-cap", ProjectViewID: 4, CreatedByID: u.ID})
+			require.NoError(t, err)
+		}
+		oldCount, err := s.Where("project_view_id = ?", 4).Count(&Bucket{})
+		require.NoError(t, err)
+		require.Greater(t, oldCount, int64(maxBucketsPerView))
+
+		l := &ProjectDuplicate{ProjectID: 1}
+		can, err := l.CanCreate(s, u)
+		require.NoError(t, err)
+		require.True(t, can)
+		require.NoError(t, l.Create(s, u))
+
+		newView := &ProjectView{}
+		has, err := s.Where("project_id = ? AND view_kind = ?", l.Project.ID, ProjectViewKindKanban).Get(newView)
+		require.NoError(t, err)
+		require.True(t, has)
+		newCount, err := s.Where("project_view_id = ?", newView.ID).Count(&Bucket{})
+		require.NoError(t, err)
+		assert.Equal(t, oldCount, newCount)
+	})
+
+	t.Run("shares are not copied by default", func(t *testing.T) {
+		files.InitTestFileFixtures(t)
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		// Project 3 has user, team and link shares
+		u := &user.User{ID: 3}
+		l := &ProjectDuplicate{ProjectID: 3}
+		can, err := l.CanCreate(s, u)
+		require.NoError(t, err)
+		assert.True(t, can)
+		require.NoError(t, l.Create(s, u))
+
+		assertShareCount(t, s, l.Project.ID, 0, 0, 0)
+	})
+
+	t.Run("shares are copied when duplicate_shares is set", func(t *testing.T) {
+		files.InitTestFileFixtures(t)
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		// Project 3 has 2 user shares, 1 team share and 1 link share
+		u := &user.User{ID: 3}
+		l := &ProjectDuplicate{ProjectID: 3, DuplicateShares: true}
+		can, err := l.CanCreate(s, u)
+		require.NoError(t, err)
+		assert.True(t, can)
+		require.NoError(t, l.Create(s, u))
+
+		assertShareCount(t, s, l.Project.ID, 2, 1, 1)
+	})
+
+	t.Run("preserves out-of-order task indexes", func(t *testing.T) {
+		files.InitTestFileFixtures(t)
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		_, err := s.Insert(
+			&Task{Title: "high index", ProjectID: 4, Index: 10, CreatedByID: 3, UID: "duplicate-high-index"},
+			&Task{Title: "low index", ProjectID: 4, Index: 5, CreatedByID: 3, UID: "duplicate-low-index"},
+		)
+		require.NoError(t, err)
+		_, err = s.ID(4).Cols("last_index").Update(&ProjectTaskCounter{LastIndex: 10})
+		require.NoError(t, err)
+
+		usr := &user.User{ID: 3}
+		duplicate := &ProjectDuplicate{ProjectID: 4}
+		can, err := duplicate.CanCreate(s, usr)
+		require.NoError(t, err)
+		require.True(t, can)
+		require.NoError(t, duplicate.Create(s, usr))
+
+		for title, index := range map[string]int64{"high index": 10, "low index": 5} {
+			task := &Task{}
+			has, err := s.Where("project_id = ? AND title = ?", duplicate.Project.ID, title).Get(task)
+			require.NoError(t, err)
+			require.True(t, has)
+			assert.Equal(t, index, task.Index)
+		}
+
+		counter := &ProjectTaskCounter{}
+		has, err := s.ID(duplicate.Project.ID).Get(counter)
+		require.NoError(t, err)
+		require.True(t, has)
+		assert.Equal(t, int64(10), counter.LastIndex)
+	})
+}
+
+func assertShareCount(t *testing.T, s *xorm.Session, projectID, users, teams, links int64) {
+	userCount, err := s.Where("project_id = ?", projectID).Count(&ProjectUser{})
+	require.NoError(t, err)
+	assert.Equal(t, users, userCount, "unexpected number of user shares")
+
+	teamCount, err := s.Where("project_id = ?", projectID).Count(&TeamProject{})
+	require.NoError(t, err)
+	assert.Equal(t, teams, teamCount, "unexpected number of team shares")
+
+	linkCount, err := s.Where("project_id = ?", projectID).Count(&LinkSharing{})
+	require.NoError(t, err)
+	assert.Equal(t, links, linkCount, "unexpected number of link shares")
+}
+
+func testProjectDuplicate(t *testing.T, projectID int64, userID int64) {
+	files.InitTestFileFixtures(t)
+	db.LoadAndAssertFixtures(t)
+	s := db.NewSession()
+	defer s.Close()
+
+	u := &user.User{
+		ID: userID,
+	}
+
+	l := &ProjectDuplicate{
+		ProjectID:       projectID,
+		DuplicateShares: true,
+	}
+	can, err := l.CanCreate(s, u)
+	require.NoError(t, err)
+	assert.True(t, can)
+	err = l.Create(s, u)
+	require.NoError(t, err)
+
+	originalProjectID := l.ProjectID
+	duplicatedProjectID := l.Project.ID
+
+	// assert the new project has the same number of buckets as the old one
+	numberOfOriginalViews, err := s.Where("project_id = ?", originalProjectID).Count(&ProjectView{})
+	require.NoError(t, err)
+	numberOfDuplicatedViews, err := s.Where("project_id = ?", duplicatedProjectID).Count(&ProjectView{})
+	require.NoError(t, err)
+	assert.Equal(t, numberOfOriginalViews, numberOfDuplicatedViews, "duplicated project does not have the same amount of views as the original one")
+
+	// Check that the duplicated project has the same number of tasks as the original
+	numberOfOriginalTasks, err := s.Where("project_id = ?", originalProjectID).Count(&Task{})
+	require.NoError(t, err)
+	numberOfDuplicatedTasks, err := s.Where("project_id = ?", duplicatedProjectID).Count(&Task{})
+	require.NoError(t, err)
+	assert.Equal(t, numberOfOriginalTasks, numberOfDuplicatedTasks, "duplicated project does not have the same amount of tasks as the original one")
+
+	// Check that each view has the same number of task positions between original and duplicated project
+	var originalViews []*ProjectView
+	err = s.Where("project_id = ?", originalProjectID).
+		OrderBy("position").
+		Find(&originalViews)
+	require.NoError(t, err)
+
+	var duplicatedViews []*ProjectView
+	err = s.Where("project_id = ?", duplicatedProjectID).
+		OrderBy("position").
+		Find(&duplicatedViews)
+	require.NoError(t, err)
+
+	// Create a map of original view positions to compare with duplicated views
+	originalViewPositions := make(map[int64]int64)
+	for _, view := range originalViews {
+		count, err := s.Where("project_view_id = ?", view.ID).Count(&TaskPosition{})
+		require.NoError(t, err)
+		originalViewPositions[view.ID] = count
+	}
+
+	// For each duplicated view, check if it has the same number of task positions as its original counterpart
+	for i, view := range duplicatedViews {
+		taskPositionsCount, err := s.Where("project_view_id = ?", view.ID).Count(&TaskPosition{})
+		require.NoError(t, err)
+		assert.Equal(
+			t,
+			originalViewPositions[originalViews[i].ID],
+			taskPositionsCount,
+			"duplicated view '%s' does not have the same amount of task positions as the original view", view.Title,
+		)
+	}
+
+	// Check that each view has the same number of task buckets between original and duplicated project
+	originalViewBuckets := make(map[int64]int64)
+	for _, view := range originalViews {
+		count, err := s.Where("project_view_id = ?", view.ID).Count(&TaskBucket{})
+		require.NoError(t, err)
+		originalViewBuckets[view.ID] = count
+	}
+
+	// For each duplicated view, check if it has the same number of task buckets as its original counterpart
+	for i, view := range duplicatedViews {
+		taskBucketsCount, err := s.Where("project_view_id = ?", view.ID).Count(&TaskBucket{})
+		require.NoError(t, err)
+		assert.Equal(
+			t,
+			originalViewBuckets[originalViews[i].ID],
+			taskBucketsCount,
+			"duplicated view '%s' does not have the same amount of task buckets as the original view", view.Title,
+		)
+	}
+
+	// Check that the kanban view in the duplicated project has a different default bucket than the original
+	// (only if the original kanban view has a default bucket configured)
+	var originalKanbanView *ProjectView
+	var duplicatedKanbanView *ProjectView
+
+	for _, view := range originalViews {
+		if view.ViewKind == ProjectViewKindKanban {
+			originalKanbanView = view
+			break
+		}
+	}
+
+	for _, view := range duplicatedViews {
+		if view.ViewKind == ProjectViewKindKanban {
+			duplicatedKanbanView = view
+			break
+		}
+	}
+
+	if originalKanbanView != nil && duplicatedKanbanView != nil && originalKanbanView.DefaultBucketID != 0 {
+		assert.NotEqual(t, originalKanbanView.DefaultBucketID, duplicatedKanbanView.DefaultBucketID)
+	}
+}

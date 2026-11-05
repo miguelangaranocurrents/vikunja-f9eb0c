@@ -1,0 +1,150 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "labels": [
+    "dependencies"
+  ],
+  "extends": [
+    "config:best-practices",
+    "config:js-app"
+  ],
+  "hostRules": [
+    {
+      "timeout": 600000
+    }
+  ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "osvVulnerabilityAlerts": true,
+  "packageRules": [
+    {
+      "groupName": "caniuse-and-related",
+      "matchPackageNames": [
+        "caniuse-lite",
+        "browserslist"
+      ]
+    },
+    {
+      "groupName": "vueuse",
+      "matchPackageNames": [
+        "@vueuse/{/,}**"
+      ]
+    },
+    {
+      "groupName": "histoire",
+      "matchPackageNames": [
+        "@histoire/{/,}**",
+        "histoire{/,}**"
+      ]
+    },
+    {
+      "groupName": "tiptap",
+      "matchPackageNames": [
+        "@tiptap/{/,}**",
+        "tiptap{/,}**"
+      ]
+    },
+    {
+      "matchDepTypes": [
+        "devDependencies"
+      ],
+      "groupName": "dev-dependencies"
+    },
+    {
+      "groupName": "playwright",
+      "matchPackageNames": [
+        "@playwright/{/,}**",
+        "mcr.microsoft.com/playwright"
+      ]
+    },
+    {
+      "description": "Transitive pins exist for security only; alerts bypass the schedule",
+      "matchDepTypes": [
+        "pnpm.overrides",
+        "overrides"
+      ],
+      "groupName": "overrides",
+      "extends": [
+        "schedule:monthly"
+      ]
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchDepTypes": [
+        "action"
+      ],
+      "groupName": "github-actions",
+      "extends": [
+        "schedule:monthly"
+      ]
+    },
+    {
+      "groupName": "aws-sdk-go",
+      "matchPackageNames": [
+        "github.com/aws/aws-sdk-go-v2{/,}**",
+        "github.com/aws/smithy-go"
+      ],
+      "extends": [
+        "schedule:monthly"
+      ]
+    },
+    {
+      "groupName": "golang.org/x",
+      "matchPackageNames": [
+        "golang.org/x/**"
+      ]
+    },
+    {
+      "groupName": "node",
+      "matchPackageNames": [
+        "node"
+      ],
+      "matchManagers": [
+        "mise",
+        "nvm"
+      ],
+      "extends": [
+        "schedule:monthly"
+      ]
+    },
+    {
+      "groupName": "pnpm",
+      "matchPackageNames": [
+        "pnpm"
+      ],
+      "matchManagers": [
+        "mise",
+        "npm"
+      ],
+      "extends": [
+        "schedule:monthly"
+      ]
+    },
+    {
+      "description": "xgo images are rebuilt per go release",
+      "groupName": "go",
+      "matchDepNames": [
+        "go",
+        "ghcr.io/techknowlogick/xgo"
+      ],
+      "matchManagers": [
+        "gomod",
+        "mise",
+        "dockerfile"
+      ],
+      "schedule": [
+        "before 6am on monday"
+      ],
+      "minimumReleaseAge": "2 days"
+    },
+    {
+      "description": "Let renovate move the floating go-1.N.x tag on go minors",
+      "matchDepNames": [
+        "ghcr.io/techknowlogick/xgo"
+      ],
+      "versioning": "regex:^go-(?<major>\\d+)\\.(?<minor>\\d+)\\.x$"
+    }
+  ]
+}

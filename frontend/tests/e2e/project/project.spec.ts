@@ -1,0 +1,247 @@
+import {readFile} from 'node:fs/promises'
+import {test, expect} from '../../support/fixtures'
+import {TaskFactory} from '../../factories/task'
+import {ProjectFactory} from '../../factories/project'
+import {createProjects} from './prepareProjects'
+
+test.describe('Projects', () => {
+	test.use({
+		// Use authenticated page for all tests
+	})
+
+	let projects: any[]
+
+	test.beforeEach(async ({authenticatedPage}) => {
+		projects = await createProjects()
+	})
+
+	test('Should create a new project', async ({authenticatedPage: page}) => {
+		await page.goto('/projects')
+		await page.waitForLoadState('networkidle')
+		await page.locator('.action-buttons').getByRole('link', {name: /project/i}).click()
+		await expect(page).toHaveURL(/\/projects\/new/)
+		await expect(page.locator('.card-header-title')).toContainText('New project')
+		await page.locator('input[name=projectTitle]').fill('New Project')
+		await page.locator('.button').filter({hasText: 'Create'}).click()
+
+		await expect(page.locator('.global-notification', {timeout: 1000})).toContainText('Success')
+		await expect(page).toHaveURL(/\/projects\//)
+		await expect(page.locator('.project-title')).toContainText('New Project')
+	})
+
+	test('Should redirect to a specific project view after visited', async ({authenticatedPage: page}) => {
+		const projectId = projects[0].id
+		const kanbanViewId = projects[0].views[3].id
+		const loadBucketsPromise = page.waitForResponse(response =>
+			response.url().includes(`/projects/${projectId}/`) &&
+			response.url().includes('/views/') &&
+			response.url().includes('/tasks'),
+		)
+
+		await page.goto(`/projects/${projectId}/${kanbanViewId}`)
+		await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/${kanbanViewId}`))
+		await loadBucketsPromise
+		await page.goto(`/projects/${projectId}`)
+		await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/${kanbanViewId}`))
+	})
+
+	// FIXME: seeding fails with error 500
+	test('Should rename the project in all places', async ({authenticatedPage: page}) => {
+		const projectId = projects[0].id
+		const listViewId = projects[0].views[0].id
+		await TaskFactory.create(5, {
+			id: '{increment}',
+			project_id: projectId,
+		})
+		const newProjectName = 'New project name'
+
+		// Navigate to project and wait for redirect to view
+		await page.goto(`/projects/${projectId}/${listViewId}`)
+		await page.waitForLoadState('networkidle')
+		await expect(page.locator('.project-title')).toContainText('First Project')
+
+		// Click the project title dropdown and select Edit
+		await page.locator('.project-title-dropdown .project-title-button').click()
+		await page.getByRole('link', {name: /^edit$/i}).click()
+		await page.waitForLoadState('networkidle')
+
+		// Fill in the new name
+		await page.locator('input#title').fill(newProjectName)
+		await page.locator('footer.card-footer .button').filter({hasText: /^Save$/}).click()
+
+		await expect(page.locator('.global-notification')).toContainText('Success')
+		await expect(page.locator('.project-title')).toContainText(newProjectName)
+		await expect(page.locator('.project-title')).not.toContainText(projects[0].title)
+		await expect(page.locator('.menu-container .menu-list').getByRole('listitem').filter({hasText: newProjectName})).toBeVisible()
+		await page.goto('/')
+		await expect(page.locator('.project-grid')).toContainText(newProjectName)
+		await expect(page.locator('.project-grid')).not.toContainText(projects[0].title)
+	})
+
+	test('Should remove a project when deleting it', async ({authenticatedPage: page}) => {
+		const projectId = projects[0].id
+		const listViewId = projects[0].views[0].id
+		await page.goto(`/projects/${projectId}/${listViewId}`)
+		await page.waitForLoadState('networkidle')
+
+		await page.locator('.project-title-dropdown .project-title-button').click()
+		await page.getByRole('link', {name: /^delete$/i}).click()
+		await page.waitForLoadState('networkidle')
+
+		await expect(page).toHaveURL(/\/settings\/delete/)
+		await page.getByRole('button', {name: /do it/i}).click()
+
+		await expect(page.locator('.global-notification')).toContainText('Success')
+		await expect(page).toHaveURL('/')
+		await expect(page.getByRole('link', {name: projects[0].title})).not.toBeVisible()
+	})
+
+	// Opened directly, the dialog is the first history entry, so there is nothing to go back to.
+	test('Should close a directly opened edit dialog on cancel', async ({authenticatedPage: page}) => {
+		const projectId = projects[0].id
+		await page.goto(`/projects/${projectId}/settings/edit`)
+
+		const dialog = page.getByRole('dialog', {name: 'Edit This Project'})
+		await dialog.getByRole('button', {name: 'Cancel', exact: true}).click()
+
+		await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/\\d+$`))
+		await expect(dialog).toHaveCount(0)
+	})
+
+	test('Should close a directly opened edit dialog after saving', async ({authenticatedPage: page}) => {
+		const projectId = projects[0].id
+		await page.goto(`/projects/${projectId}/settings/edit`)
+
+		const dialog = page.getByRole('dialog', {name: 'Edit This Project'})
+		await dialog.locator('input#title').fill('Renamed directly')
+		await dialog.getByRole('button', {name: 'Save', exact: true}).click()
+
+		await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/\\d+$`))
+		await expect(dialog).toHaveCount(0)
+		await expect(page.locator('.project-title')).toContainText('Renamed directly')
+	})
+
+	test('Should keep the project when cancelling a directly opened delete dialog', async ({authenticatedPage: page, apiContext, userToken}) => {
+		const projectId = projects[0].id
+		await page.goto(`/projects/${projectId}/settings/delete`)
+
+		const dialog = page.getByRole('dialog', {name: 'Delete this project'})
+		await dialog.getByRole('button', {name: 'Cancel', exact: true}).click()
+
+		await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/\\d+$`))
+		await expect(dialog).toHaveCount(0)
+		const response = await apiContext.get(`projects/${projectId}`, {
+			headers: {Authorization: `Bearer ${userToken}`},
+		})
+		expect(response.ok()).toBe(true)
+	})
+
+	test('Should archive a project', async ({authenticatedPage: page}) => {
+		const projectId = projects[0].id
+		const listViewId = projects[0].views[0].id
+		await page.goto(`/projects/${projectId}/${listViewId}`)
+		await page.waitForLoadState('networkidle')
+
+		await page.locator('.project-title-dropdown .project-title-button').click()
+		await page.getByRole('link', {name: /^archive$/i}).click()
+		await expect(page.locator('dialog[open] .modal-content')).toContainText('Archive this project')
+		await page.getByRole('button', {name: /do it/i}).click()
+
+		await expect(page.locator('.global-notification')).toContainText('Success')
+		await expect(page.locator('main.app-content')).toContainText('This project is archived. It is not possible to create new or edit tasks for it.')
+	})
+
+	test('Should upload and remove a project background without stale previews', async ({authenticatedPage: page}) => {
+		const project = projects[0]
+		const background = page.locator('.app-container-background')
+		const card = page.locator('.project-card').filter({has: page.getByRole('link', {name: project.title, exact: true})})
+
+		async function openBackgroundSettings() {
+			await page.locator('.project-title-dropdown .project-title-button').click()
+			await page.locator(`a[href="/projects/${project.id}/settings/background"]`).click()
+			await expect(page.locator('.project-background-setting')).toBeVisible()
+		}
+
+		await page.goto(`/projects/${project.id}/${project.views[0].id}`)
+		await expect(page.locator('.project-title')).toContainText(project.title)
+		await openBackgroundSettings()
+		const upload = page.waitForResponse(response =>
+			new URL(response.url()).pathname.endsWith(`/projects/${project.id}/backgrounds/upload`) &&
+			response.request().method() === 'PUT',
+		)
+		await page.locator('.project-background-setting input[type="file"]').setInputFiles({
+			name: 'image-blue.png',
+			mimeType: 'image/png',
+			buffer: await readFile('tests/fixtures/image-blue.png'),
+		})
+		expect((await upload).ok()).toBe(true)
+		await expect(background).toHaveClass(/is-visible/)
+		await expect(background).toHaveCSS('background-image', /url\(/)
+		await page.locator('.project-background-setting footer.card-footer').getByRole('button', {name: 'Close', exact: true}).click()
+
+		await page.reload()
+		await expect(background).toHaveClass(/is-visible/)
+		await expect(background).toHaveCSS('background-image', /url\(/)
+		await page.goto('/projects')
+		await expect(card.locator('.project-background')).toHaveCSS('background-image', /url\(/)
+
+		await card.getByRole('link', {name: project.title, exact: true}).click()
+		await openBackgroundSettings()
+		const removal = page.waitForResponse(response =>
+			new URL(response.url()).pathname.endsWith(`/projects/${project.id}/background`) &&
+			response.request().method() === 'DELETE',
+		)
+		await page.getByRole('button', {name: 'Remove Background', exact: true}).click()
+		expect((await removal).ok()).toBe(true)
+		await expect(background).not.toHaveClass(/is-visible/)
+		await expect(background).toHaveCSS('background-image', 'none')
+
+		await page.reload()
+		await expect(page.locator('.project-title')).toContainText(project.title)
+		await expect(background).toHaveCSS('background-image', 'none')
+		await page.goto('/projects')
+		await expect(card).not.toHaveClass(/has-background/)
+		await expect(card.locator('.project-background')).toHaveCSS('background-image', 'none')
+	})
+
+	test('Should show all projects on the projects page', async ({authenticatedPage: page}) => {
+		const projects = await ProjectFactory.create(10)
+
+		await page.goto('/projects')
+		await page.waitForLoadState('networkidle')
+
+		for (const p of projects) {
+			await expect(page.locator('.project-grid')).toContainText(p.title)
+		}
+	})
+
+	test('Should not show archived projects if the filter is not checked', async ({authenticatedPage: page}) => {
+		await ProjectFactory.create(1, {
+			id: 2,
+		}, false)
+		await ProjectFactory.create(1, {
+			id: 3,
+			is_archived: true,
+		}, false)
+
+		// Initial
+		await page.goto('/projects')
+		await page.waitForLoadState('networkidle')
+		await expect(page.locator('.project-grid')).not.toContainText('Archived')
+
+		// Show archived - click the checkbox label text
+		await page.getByText('Show Archived').click()
+		await expect(page.locator('input[type="checkbox"]').first()).toBeChecked()
+		await expect(page.locator('.project-grid')).toContainText('Archived')
+
+		// Don't show archived
+		await page.getByText('Show Archived').click()
+		await expect(page.locator('input[type="checkbox"]').first()).not.toBeChecked()
+
+		// Second time visiting after unchecking
+		await page.goto('/projects')
+		await page.waitForLoadState('networkidle')
+		await expect(page.locator('input[type="checkbox"]').first()).not.toBeChecked()
+		await expect(page.locator('.project-grid')).not.toContainText('Archived')
+	})
+})

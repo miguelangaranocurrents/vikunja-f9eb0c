@@ -1,0 +1,330 @@
+// Vikunja is a to-do list application to facilitate your life.
+// Copyright 2018-present Vikunja and contributors. All rights reserved.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package models
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"code.vikunja.io/api/pkg/db"
+	"code.vikunja.io/api/pkg/events"
+	"code.vikunja.io/api/pkg/user"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"xorm.io/builder"
+)
+
+func TestBulkTask_Update(t *testing.T) {
+	u := &user.User{ID: 1}
+
+	t.Run("successful update across projects", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		u := &user.User{ID: 6}
+
+		bt := &BulkTask{
+			TaskIDs: []int64{15, 16},
+			Fields:  []string{"title"},
+			Values:  &Task{Title: "bulkupdated"},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+
+		db.AssertExists(t, "tasks", map[string]interface{}{"id": 15, "title": "bulkupdated", "done": false}, false)
+		db.AssertExists(t, "tasks", map[string]interface{}{"id": 16, "title": "bulkupdated", "done": false}, false)
+	})
+
+	t.Run("unauthorized task prevents update", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		bt := &BulkTask{
+			TaskIDs: []int64{10, 14},
+			Fields:  []string{"title"},
+			Values:  &Task{Title: "bulkupdated"},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		assert.False(t, allowed)
+	})
+
+	t.Run("duplicate ids update the task once", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+		events.ClearDispatchedEvents()
+
+		bt := &BulkTask{
+			TaskIDs: []int64{1, 1, 1},
+			Fields:  []string{"title"},
+			Values:  &Task{Title: "bulkupdated"},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+		events.DispatchPending(context.Background(), s)
+
+		require.Len(t, bt.Tasks, 1)
+		assert.Equal(t, 1, events.CountDispatchedEvents("task.updated"))
+		db.AssertExists(t, "tasks", map[string]interface{}{"id": 1, "title": "bulkupdated"}, false)
+	})
+
+	t.Run("invalid field", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		bt := &BulkTask{
+			TaskIDs: []int64{10},
+			Fields:  []string{"invalid"},
+			Values:  &Task{Title: "bulkupdated"},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.Error(t, err)
+		var expectedErr ErrInvalidTaskColumn
+		assert.ErrorAs(t, err, &expectedErr)
+	})
+
+	t.Run("update done_at when bulk marking tasks done", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		bt := &BulkTask{
+			TaskIDs: []int64{1, 3},
+			Fields:  []string{"done"},
+			Values:  &Task{Done: true},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+
+		db.AssertMissing(t, "tasks", map[string]interface{}{"id": 1, "done": false, "done_at": nil})
+		db.AssertMissing(t, "tasks", map[string]interface{}{"id": 3, "done": false, "done_at": nil})
+
+		require.Len(t, bt.Tasks, 2)
+		assert.NotZero(t, bt.Tasks[0].DoneAt)
+		assert.NotZero(t, bt.Tasks[1].DoneAt)
+	})
+
+	t.Run("bulk update without assignees field keeps assignees", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		// Task 30 has users 1 and 2 assigned in the fixtures. A bulk update
+		// that only names "priority" in fields must not touch them (#4109).
+		bt := &BulkTask{
+			TaskIDs: []int64{30},
+			Fields:  []string{"priority"},
+			Values:  &Task{Priority: 3},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+
+		db.AssertExists(t, "tasks", map[string]interface{}{"id": 30, "priority": 3}, false)
+		db.AssertExists(t, "task_assignees", map[string]interface{}{"task_id": 30, "user_id": 1}, false)
+		db.AssertExists(t, "task_assignees", map[string]interface{}{"task_id": 30, "user_id": 2}, false)
+	})
+
+	t.Run("bulk update with assignees field replaces assignees", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		bt := &BulkTask{
+			TaskIDs: []int64{30},
+			Fields:  []string{"assignees"},
+			Values:  &Task{Assignees: []*user.User{{ID: 1}}},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+
+		db.AssertExists(t, "task_assignees", map[string]interface{}{"task_id": 30, "user_id": 1}, false)
+		db.AssertMissing(t, "task_assignees", map[string]interface{}{"task_id": 30, "user_id": 2})
+	})
+
+	t.Run("bulk update without reminders field keeps reminders", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		bt := &BulkTask{
+			TaskIDs: []int64{27},
+			Fields:  []string{"priority"},
+			Values:  &Task{Priority: 3},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+
+		db.AssertCount(t, "task_reminders", builder.Eq{"task_id": 27}, 2)
+		db.AssertExists(t, "task_reminders", map[string]interface{}{"task_id": 27, "relative_to": "start_date", "relative_period": -3600}, false)
+	})
+
+	t.Run("bulk update with reminders field replaces reminders", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		reminder := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+		bt := &BulkTask{
+			TaskIDs: []int64{27},
+			Fields:  []string{"reminders"},
+			Values:  &Task{Reminders: []*TaskReminder{{Reminder: reminder}}},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+
+		db.AssertCount(t, "task_reminders", builder.Eq{"task_id": 27}, 1)
+		db.AssertMissing(t, "task_reminders", map[string]interface{}{"task_id": 27, "relative_to": "start_date"})
+	})
+
+	t.Run("bulk update without is_favorite field keeps favorites", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		bt := &BulkTask{
+			TaskIDs: []int64{1, 2},
+			Fields:  []string{"priority"},
+			Values:  &Task{Priority: 3, IsFavorite: true},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+
+		db.AssertExists(t, "favorites", map[string]interface{}{"entity_id": 1, "user_id": 1, "kind": FavoriteKindTask}, false)
+		db.AssertMissing(t, "favorites", map[string]interface{}{"entity_id": 2, "user_id": 1, "kind": FavoriteKindTask})
+	})
+
+	t.Run("bulk update with is_favorite field sets favorites", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		bt := &BulkTask{
+			TaskIDs: []int64{1, 2},
+			Fields:  []string{"is_favorite"},
+			Values:  &Task{IsFavorite: false},
+		}
+
+		allowed, err := bt.CanUpdate(s, u)
+		require.NoError(t, err)
+		require.True(t, allowed)
+
+		err = bt.Update(s, u)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+
+		db.AssertMissing(t, "favorites", map[string]interface{}{"entity_id": 1, "user_id": 1, "kind": FavoriteKindTask})
+		db.AssertMissing(t, "favorites", map[string]interface{}{"entity_id": 2, "user_id": 1, "kind": FavoriteKindTask})
+	})
+
+	t.Run("empty fields is rejected", func(t *testing.T) {
+		for name, fields := range map[string][]string{"nil": nil, "empty": {}} {
+			t.Run(name, func(t *testing.T) {
+				db.LoadAndAssertFixtures(t)
+				s := db.NewSession()
+				defer s.Close()
+
+				bt := &BulkTask{
+					TaskIDs: []int64{1},
+					Fields:  fields,
+					Values:  &Task{Title: "bulkupdated"},
+				}
+
+				_, err := bt.CanUpdate(s, u)
+				require.Error(t, err)
+				assert.ErrorAs(t, err, &ErrBulkTaskFieldsRequired{})
+			})
+		}
+	})
+
+	t.Run("don't update done_at when bulk marking tasks done", func(t *testing.T) {
+		db.LoadAndAssertFixtures(t)
+		s := db.NewSession()
+		defer s.Close()
+
+		userProvidedTime := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+		bt := &BulkTask{
+			TaskIDs: []int64{1, 3},
+			Fields:  []string{"done", "done_at"},
+			Values:  &Task{Done: true, DoneAt: userProvidedTime},
+		}
+
+		err := bt.Update(s, u)
+		require.Error(t, err)
+		var expectedErr ErrInvalidTaskColumn
+		assert.ErrorAs(t, err, &expectedErr)
+	})
+}

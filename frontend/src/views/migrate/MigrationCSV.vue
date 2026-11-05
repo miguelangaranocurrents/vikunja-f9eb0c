@@ -1,0 +1,494 @@
+<template>
+	<div class="content csv-migration">
+		<h1>{{ $t('migrate.titleService', {name: 'CSV'}) }}</h1>
+		<p>{{ $t('migrate.csv.description') }}</p>
+
+		<Message
+			v-if="error"
+			variant="danger"
+			class="mbe-4"
+		>
+			{{ error }}
+		</Message>
+
+		<!-- Step 1: File Upload -->
+		<div
+			v-if="step === 'upload'"
+			class="upload-step"
+		>
+			<p>{{ $t('migrate.csv.uploadDescription') }}</p>
+			<input
+				ref="uploadInput"
+				class="is-hidden"
+				type="file"
+				accept=".csv,.txt"
+				@change="handleFileUpload"
+			>
+			<XButton
+				:loading="isLoading"
+				:disabled="isLoading || undefined"
+				@click="uploadInput?.click()"
+			>
+				{{ $t('migrate.csv.selectFile') }}
+			</XButton>
+		</div>
+
+		<!-- Step 2: Column Mapping -->
+		<div
+			v-else-if="step === 'mapping'"
+			class="mapping-step"
+		>
+			<div class="mapping-header">
+				<p>{{ $t('migrate.csv.columnMappingDescription') }}</p>
+			</div>
+
+			<!-- Parsing Options -->
+			<div class="parsing-options card">
+				<h3>{{ $t('migrate.csv.parsingOptions') }}</h3>
+				<div class="options-grid">
+					<div class="option-group">
+						<label for="delimiter">{{ $t('migrate.csv.delimiter') }}</label>
+						<div class="select is-fullwidth">
+							<select
+								id="delimiter"
+								v-model="config.delimiter"
+								@change="updatePreview"
+							>
+								<option
+									v-for="delim in SUPPORTED_DELIMITERS"
+									:key="delim"
+									:value="delim"
+								>
+									{{ getDelimiterLabel(delim) }}
+								</option>
+							</select>
+						</div>
+					</div>
+					<div class="option-group">
+						<label for="dateFormat">{{ $t('migrate.csv.dateFormat') }}</label>
+						<div class="select is-fullwidth">
+							<select
+								id="dateFormat"
+								v-model="config.date_format"
+								@change="updatePreview"
+							>
+								<option
+									v-for="format in SUPPORTED_DATE_FORMATS"
+									:key="format"
+									:value="format"
+								>
+									{{ getDateFormatLabel(format) }}
+								</option>
+							</select>
+						</div>
+					</div>
+					<div class="option-group">
+						<label for="skipRows">{{ $t('migrate.csv.skipRows') }}</label>
+						<input
+							id="skipRows"
+							v-model.number="config.skip_rows"
+							type="number"
+							class="input"
+							min="0"
+							@change="updatePreview"
+						>
+					</div>
+				</div>
+			</div>
+
+			<!-- Column Mappings -->
+			<div class="column-mappings card">
+				<h3>{{ $t('migrate.csv.mapColumns') }}</h3>
+				<div class="mappings-grid">
+					<div
+						v-for="(mapping, index) in config.mapping"
+						:key="index"
+						class="mapping-row"
+					>
+						<div class="column-name">
+							<strong>{{ mapping.column_name }}</strong>
+							<span
+								v-if="previewRow"
+								class="preview-value"
+							>
+								{{ $t('migrate.csv.example') }}: {{ previewRow[index] || '-' }}
+							</span>
+						</div>
+						<div class="select is-fullwidth">
+							<select
+								v-model="mapping.attribute"
+								@change="updatePreview"
+							>
+								<option
+									v-for="attr in TASK_ATTRIBUTES"
+									:key="attr"
+									:value="attr"
+								>
+									{{ getAttributeLabel(attr) }}
+								</option>
+							</select>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- Preview -->
+			<div
+				v-if="previewResult"
+				class="preview-section card"
+			>
+				<h3>{{ $t('migrate.csv.preview') }}</h3>
+				<p>{{ $t('migrate.csv.previewDescription', {count: previewResult.total_rows}) }}</p>
+
+				<div class="preview-tasks">
+					<div
+						v-for="(task, index) in previewTasks"
+						:key="index"
+						@click.capture.prevent.stop
+					>
+						<SingleTaskInProject
+							:the-task="task"
+							disabled
+							:can-mark-as-done="false"
+						/>
+					</div>
+				</div>
+			</div>
+
+			<!-- Actions -->
+			<div class="actions">
+				<XButton
+					variant="tertiary"
+					@click="resetToUpload"
+				>
+					{{ $t('misc.cancel') }}
+				</XButton>
+				<XButton
+					:loading="isLoading"
+					:disabled="!hasValidMapping || isLoading"
+					@click="performImport"
+				>
+					{{ $t('migrate.csv.import') }}
+				</XButton>
+			</div>
+		</div>
+
+		<!-- Step 3: Success -->
+		<div
+			v-else-if="step === 'success'"
+			class="success-step"
+		>
+			<Message
+				ref="resultMessage"
+				:variant="migrationStore.hasFailed ? 'danger' : 'info'"
+				role="status"
+				aria-live="polite"
+				tabindex="-1"
+				class="mbe-4"
+			>
+				<template v-if="migrationStore.hasFailed">
+					{{ $t(migrationStore.failureKey, {service: 'CSV', reason: migrationStore.errorMessage}) }}
+				</template>
+				<template v-else-if="migrationStore.isFinished">
+					{{ $t('migrate.migrationFinished', {service: 'CSV'}) }}
+				</template>
+				<template v-else>
+					{{ $t('migrate.migrationStartedWillReciveEmail', {service: 'CSV'}) }}
+				</template>
+			</Message>
+			<XButton :to="{name: 'home'}">
+				{{ $t('home.goToOverview') }}
+			</XButton>
+		</div>
+	</div>
+</template>
+
+<script setup lang="ts">
+import {computed, nextTick, ref, watch} from 'vue'
+import {useI18n} from 'vue-i18n'
+
+import Message from '@/components/misc/Message.vue'
+import SingleTaskInProject from '@/components/tasks/partials/SingleTaskInProject.vue'
+import {createTaskDraft} from '@/helpers/task'
+
+import {TASK_ATTRIBUTES, SUPPORTED_DELIMITERS, SUPPORTED_DATE_FORMATS, type CsvImportDraft} from './csvImport'
+import {useDetectCsvMutation, usePreviewCsvMutation, useStartMigrationMutation} from '@/client/queries/migration'
+
+import {isRequestContextAbort} from '@/client/requestContext'
+import {useTitle} from '@/composables/useTitle'
+import {useMigrationStore} from '@/stores/migration'
+import {getErrorText} from '@/message'
+import {CSV_ATTRIBUTE_LABEL_KEYS} from './csvAttributeLabels'
+
+type Step = 'upload' | 'mapping' | 'success'
+
+const {t} = useI18n({useScope: 'global'})
+
+useTitle(() => t('migrate.titleService', {name: 'CSV'}))
+
+const detect = useDetectCsvMutation()
+const preview = usePreviewCsvMutation()
+const startMigration = useStartMigrationMutation()
+
+const migrationStore = useMigrationStore()
+
+const step = ref<Step>('upload')
+const error = ref('')
+const isLoading = computed(() => detect.isPending.value || preview.isPending.value || startMigration.isPending.value)
+const uploadInput = ref<HTMLInputElement | null>(null)
+const selectedFile = ref<File | null>(null)
+const detectionResult = detect.data
+const previewResult = preview.data
+const resultMessage = ref<InstanceType<typeof Message> | null>(null)
+
+// the triggering button unmounts when the step switches, so move focus to the result message
+watch(step, async (newStep) => {
+	if (newStep !== 'success') {
+		return
+	}
+	await nextTick()
+	resultMessage.value?.$el?.focus()
+})
+
+const config = ref<CsvImportDraft>({
+	delimiter: ',',
+	quote_char: '"',
+	date_format: '2006-01-02',
+	skip_rows: 0,
+	mapping: [],
+})
+
+const previewTasks = computed(() => {
+	if (!previewResult.value) return []
+	return (previewResult.value.tasks ?? []).map((pt, i) => createTaskDraft({
+		id: -(i + 1),
+		title: pt.title || t('migrate.csv.untitled'),
+		description: pt.description || '',
+		done: pt.done,
+		due_date: pt.due_date || undefined,
+		start_date: pt.start_date || undefined,
+		end_date: pt.end_date || undefined,
+		priority: pt.priority,
+		labels: (pt.labels || []).map((l, li) => ({id: -(li + 1), title: l})),
+	}))
+})
+
+const previewRow = computed(() => detectionResult.value?.preview_rows?.[0] ?? null)
+
+const hasValidMapping = computed(() => {
+	if (!config.value.mapping.length) return false
+	// At least one column should be mapped to title
+	return config.value.mapping.some(m => m.attribute === 'title')
+})
+
+function getAttributeLabel(attribute: string): string {
+	return t(CSV_ATTRIBUTE_LABEL_KEYS[attribute] || attribute)
+}
+
+function getDelimiterLabel(delimiter: string): string {
+	const labels: Record<string, string> = {
+		',': t('migrate.csv.delimiters.comma'),
+		';': t('migrate.csv.delimiters.semicolon'),
+		'\t': t('migrate.csv.delimiters.tab'),
+		'|': t('migrate.csv.delimiters.pipe'),
+	}
+	return labels[delimiter] || delimiter
+}
+
+function getDateFormatLabel(format: string): string {
+	const labels: Record<string, string> = {
+		'2006-01-02': 'YYYY-MM-DD (2024-01-15)',
+		'2006-01-02T15:04:05': 'ISO DateTime (2024-01-15T10:30:00)',
+		'02/01/2006': 'DD/MM/YYYY (15/01/2024)',
+		'01/02/2006': 'MM/DD/YYYY (01/15/2024)',
+		'02-01-2006': 'DD-MM-YYYY (15-01-2024)',
+		'01-02-2006': 'MM-DD-YYYY (01-15-2024)',
+		'02.01.2006': 'DD.MM.YYYY (15.01.2024)',
+		'2006/01/02': 'YYYY/MM/DD (2024/01/15)',
+		'2006-01-02 15:04:05': 'DateTime (2024-01-15 10:30:00)',
+	}
+	return labels[format] || format
+}
+
+async function handleFileUpload() {
+	const files = uploadInput.value?.files
+	if (!files || files.length === 0) return
+
+	selectedFile.value = files[0]
+	error.value = ''
+
+	try {
+		const result = await detect.mutateAsync(selectedFile.value)
+
+		// Apply detected values
+		config.value = {
+			delimiter: result?.delimiter ?? ',',
+			quote_char: result?.quote_char ?? '"',
+			date_format: result?.date_format ?? '2006-01-02',
+			skip_rows: 0,
+			mapping: structuredClone(result?.suggested_mapping ?? []),
+		}
+
+		// Get initial preview
+		await updatePreview()
+
+		step.value = 'mapping'
+	} catch (e) {
+		if (!isRequestContextAbort(e)) error.value = getErrorText(e)
+	}
+}
+
+async function updatePreview() {
+	if (!selectedFile.value) return
+
+	try {
+		await preview.mutateAsync({import: selectedFile.value, config: JSON.stringify(config.value)})
+	} catch (e) {
+		if (!isRequestContextAbort(e)) error.value = getErrorText(e)
+		preview.reset()
+	}
+}
+
+async function performImport() {
+	if (!selectedFile.value || !hasValidMapping.value) return
+
+	error.value = ''
+
+	try {
+		await startMigration.mutateAsync({
+			kind: 'csv',
+			provider: 'csv',
+			body: {
+				import: selectedFile.value,
+				config: JSON.stringify(config.value),
+			},
+		})
+		migrationStore.start('csv')
+		step.value = 'success'
+	} catch (e) {
+		if (!isRequestContextAbort(e)) error.value = getErrorText(e)
+	}
+}
+
+function resetToUpload() {
+	step.value = 'upload'
+	selectedFile.value = null
+	detect.reset()
+	preview.reset()
+	error.value = ''
+	if (uploadInput.value) {
+		uploadInput.value.value = ''
+	}
+	config.value = {
+		delimiter: ',',
+		quote_char: '"',
+		date_format: '2006-01-02',
+		skip_rows: 0,
+		mapping: [],
+	}
+}
+</script>
+
+<style lang="scss" scoped>
+.csv-migration {
+	max-inline-size: 900px;
+	margin: 0 auto;
+}
+
+.card {
+	background: var(--white);
+	border-radius: var(--border-radius);
+	padding: 1.5rem;
+	margin-block-end: 1.5rem;
+	box-shadow: var(--shadow-sm);
+}
+
+.mapping-header {
+	margin-block-end: 1.5rem;
+
+	h2 {
+		margin-block-end: 0.5rem;
+	}
+}
+
+.parsing-options {
+	h3 {
+		margin-block-end: 1rem;
+	}
+}
+
+.options-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	gap: 1rem;
+}
+
+.option-group {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+
+	label {
+		font-weight: 500;
+	}
+}
+
+.column-mappings {
+	h3 {
+		margin-block-end: 1rem;
+	}
+}
+
+.mappings-grid {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+}
+
+.mapping-row {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 1rem;
+	align-items: center;
+	padding: 0.75rem;
+	background: var(--grey-100);
+	border-radius: var(--border-radius);
+
+	@media (width <= 600px) {
+		grid-template-columns: 1fr;
+	}
+}
+
+.column-name {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+
+	.preview-value {
+		font-size: 0.85rem;
+		color: var(--grey-500);
+	}
+}
+
+.preview-section {
+	h3 {
+		margin-block-end: 0.5rem;
+	}
+}
+
+.preview-tasks {
+	margin-block-start: 1rem;
+}
+
+.actions {
+	display: flex;
+	gap: 1rem;
+	justify-content: flex-end;
+	margin-block-start: 1.5rem;
+}
+
+.success-step {
+	text-align: center;
+	padding: 2rem;
+}
+</style>

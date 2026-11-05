@@ -1,0 +1,126 @@
+import { VueRenderer } from '@tiptap/vue-3'
+import type { Editor } from '@tiptap/core'
+
+import MentionList from './MentionList.vue'
+import { getPopupContainer } from '../popupContainer'
+import { createSuggestionPopup, type SuggestionPopup } from '../suggestionPopup'
+import {searchProjectUsers} from '@/client/queries/userSearch'
+import { getDisplayName } from '@/helpers/user'
+import type { MentionNodeAttrs } from '@tiptap/extension-mention'
+
+interface MentionItem extends MentionNodeAttrs {
+	id: string
+	label: string
+	username: string
+}
+
+async function searchUsersForProject(projectId: number, query: string): Promise<MentionItem[]> {
+	const users = await searchProjectUsers(projectId, query)
+
+	return users.flatMap(user => user.username ? [{
+		id: user.username,
+		label: getDisplayName(user),
+		username: user.username,
+	}] : [])
+}
+
+export default function mentionSuggestionSetup(projectId: number) {
+	let debounceTimer: ReturnType<typeof setTimeout> | null = null
+
+	return {
+		char: '@',
+
+		items: async ({ query }: { query: string }): Promise<MentionItem[]> => {
+			if (!projectId) {
+				return []
+			}
+
+			// Clear existing timer
+			if (debounceTimer) {
+				clearTimeout(debounceTimer)
+			}
+
+			// Return a promise that resolves after debounce delay
+			return new Promise((resolve) => {
+				debounceTimer = setTimeout(async () => {
+					try {
+						// Use server-side search - the backend will handle searching by username and display name
+						const users = await searchUsersForProject(projectId, query)
+
+						// Limit results to avoid overwhelming the UI
+						const limit = query ? 10 : 5
+						resolve(users.slice(0, limit))
+					} catch (error) {
+						console.error('Failed to fetch users for mentions:', error)
+						resolve([])
+					}
+				}, 300) // 300ms debounce delay
+			})
+		},
+
+		render: () => {
+			// onExit runs without a matching onStart when the plugin view is recreated
+			// while a suggestion is already active, so this stays null until mounted.
+			let component: VueRenderer | null = null
+			let popup: SuggestionPopup | null = null
+
+			return {
+				onStart: (props: {
+					editor: Editor
+					clientRect?: (() => DOMRect | null) | null
+					items: MentionItem[]
+					command: (item: MentionItem) => void
+				}) => {
+					component = new VueRenderer(MentionList, {
+						props,
+						editor: props.editor,
+					})
+
+					if (!props.clientRect) {
+						return
+					}
+
+					popup = createSuggestionPopup(
+						getPopupContainer(props.editor),
+						component.element!,
+						props.clientRect,
+						props.editor.view.dom,
+					)
+				},
+
+				onUpdate(props: {
+					editor: Editor
+					clientRect?: (() => DOMRect | null) | null
+					items: MentionItem[]
+					command: (item: MentionItem) => void
+				}) {
+					component?.updateProps(props)
+					popup?.reposition()
+				},
+
+				onKeyDown(props: { event: KeyboardEvent }) {
+					if (props.event.key === 'Escape') {
+						if (props.event.isComposing) {
+							return false
+						}
+
+						if (popup) {
+							popup.element.style.display = 'none'
+						}
+
+						return true
+					}
+
+					return component?.ref?.onKeyDown(props)
+				},
+
+				onExit() {
+					popup?.destroy()
+					popup = null
+					component?.destroy()
+					component = null
+				},
+			}
+		},
+	}
+}

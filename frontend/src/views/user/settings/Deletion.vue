@@ -1,0 +1,148 @@
+<template>
+	<Card
+		v-if="configStore.user_deletion_enabled"
+		:title="$t('user.deletion.title')"
+	>
+		<template v-if="deletionScheduledAt !== null">
+			<form @submit.prevent="cancelDeletion()">
+				<p>
+					{{
+						$t('user.deletion.scheduled', {
+							date: formatDisplayDate(deletionScheduledAt),
+							dateSince: formatDateSince(deletionScheduledAt),
+						})
+					}}
+				</p>
+				<template v-if="isLocalUser">
+					<p>
+						{{ $t('user.deletion.scheduledCancelText') }}
+					</p>
+					<FormField
+						id="currentPasswordAccountDelete"
+						ref="passwordInput"
+						v-model="password"
+						:label="$t('user.settings.currentPassword')"
+						:placeholder="$t('user.settings.currentPasswordPlaceholder')"
+						type="password"
+						:error="errPasswordRequired ? $t('user.deletion.passwordRequired') : null"
+						@keyup="() => errPasswordRequired = password === ''"
+					/>
+				</template>
+				<p v-else>
+					{{ $t('user.deletion.scheduledCancelButton') }}
+				</p>
+			</form>
+
+			<XButton
+				:loading="loading"
+				class="is-fullwidth mbs-4"
+				@click="cancelDeletion()"
+			>
+				{{ $t('user.deletion.scheduledCancelConfirm') }}
+			</XButton>
+		</template>
+		<template v-else>
+			<p>
+				{{ $t('user.deletion.text1') }}
+			</p>
+			<form
+				v-if="isLocalUser"
+				@submit.prevent="deleteAccount()"
+			>
+				<p>
+					{{ $t('user.deletion.text2') }}
+				</p>
+				<FormField
+					id="currentPasswordAccountDelete"
+					ref="passwordInput"
+					v-model="password"
+					:label="$t('user.settings.currentPassword')"
+					:class="{'is-danger': errPasswordRequired}"
+					:placeholder="$t('user.settings.currentPasswordPlaceholder')"
+					type="password"
+					:error="errPasswordRequired ? $t('user.deletion.passwordRequired') : null"
+					@keyup="() => errPasswordRequired = password === ''"
+				/>
+			</form>
+			<p v-else>
+				{{ $t('user.deletion.text3') }}
+			</p>
+
+			<XButton
+				:loading="loading"
+				class="is-fullwidth mbs-4 is-danger"
+				@click="deleteAccount()"
+			>
+				{{ $t('user.deletion.confirm') }}
+			</XButton>
+		</template>
+	</Card>
+</template>
+
+<script setup lang="ts">
+import {ref, computed} from 'vue'
+import {useI18n} from 'vue-i18n'
+
+import {useRequestDeletionMutation, useCancelDeletionMutation} from '@/client/queries/accountDeletion'
+import {parseDateOrNull} from '@/helpers/parseDateOrNull'
+import {formatDateSince, formatDisplayDate} from '@/helpers/time/formatDate'
+import {useTitle} from '@/composables/useTitle'
+import {useAuthStore} from '@/stores/auth'
+import {useConfigStore} from '@/stores/config'
+import {AUTH_TYPES} from '@/constants/auth'
+import FormField from '@/components/input/FormField.vue'
+
+defineOptions({name: 'UserSettingsDeletion'})
+
+const {t} = useI18n({useScope: 'global'})
+useTitle(() => `${t('user.deletion.title')} - ${t('user.settings.title')}`)
+
+const requestMutation = useRequestDeletionMutation()
+const cancelMutation = useCancelDeletionMutation()
+const loading = computed(() => requestMutation.isPending.value || cancelMutation.isPending.value)
+const password = ref('')
+const errPasswordRequired = ref(false)
+
+const authStore = useAuthStore()
+const configStore = useConfigStore()
+
+const deletionScheduledAt = computed(() => parseDateOrNull(authStore.info?.deletion_scheduled_at))
+
+const isLocalUser = computed(() => authStore.info?.is_local_user)
+
+const passwordInput = ref()
+
+async function deleteAccount() {
+	if (isLocalUser.value && password.value === '') {
+		errPasswordRequired.value = true
+		passwordInput.value?.focus()
+		return
+	}
+
+	try {
+		await requestMutation.mutateAsync(password.value)
+	} catch {
+		return
+	}
+	password.value = ''
+}
+
+async function cancelDeletion() {
+	if (isLocalUser.value && password.value === '') {
+		errPasswordRequired.value = true
+		passwordInput.value?.focus()
+		return
+	}
+
+	try {
+		await cancelMutation.mutateAsync({
+			id: authStore.session?.id ?? 0,
+			type: authStore.session?.type ?? AUTH_TYPES.USER,
+			password: password.value,
+		})
+	} catch {
+		return
+	}
+	password.value = ''
+}
+</script>

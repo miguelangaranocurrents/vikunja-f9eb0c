@@ -1,0 +1,193 @@
+{
+	"notifications": {
+		"greeting": "Merhaba %[1]s,",
+		"email_confirm": {
+			"subject": "%[1]s, lütfen Vikunja e-posta adresini doğrula",
+			"subject_new": "%[1]s + Vikunja = <3",
+			"welcome": "Vikunja'ya hoş geldin!",
+			"confirm": "E-posta adresini doğrulamak için aşağıdaki bağlantıya tıklaman yeterli:"
+		},
+		"email_change": {
+			"subject": "Vikunja hesabın için e-posta değişikliği talebi alındı",
+			"requested": "Birisi hesabının e-posta adresini %[1]s olarak değiştirmek istedi. Sen yeni adresi onaylayana kadar mevcut adresin geçerli kalmaya devam edecek.",
+			"warning": "Bu talebi sen oluşturmadıysan vakit kaybetmeden şifreni değiştir ve hesap ayarlarından bekleyen bu işlemi iptal et."
+		},
+		"password": {
+			"changed": {
+				"subject": "Vikunja şifren değiştirildi",
+				"success": "Hesap şifren başarıyla güncellendi.",
+				"warning": "Bu değişikliği sen yapmadıysan hesabın başkalarının eline geçmiş olabilir. Böyle bir durumda vakit kaybetmeden sunucu yöneticinle iletişime geç."
+			},
+			"reset": {
+				"subject": "Vikunja şifreni sıfırla",
+				"instructions": "Şifreni sıfırlamak için aşağıdaki bağlantıya tıkla:",
+				"valid_duration": "Bu bağlantı 24 saat boyunca geçerlidir."
+			}
+		},
+		"totp": {
+			"invalid": {
+				"subject": "Birisi Vikunja hesabına girmeye çalıştı ancak başaramadı",
+				"message": "Birisi kullanıcı adın ve şifrenle giriş yapmayı denedi fakat iki adımlı doğrulama (TOTP) kodunu yanlış girdi.",
+				"warning": "**Bu sen değilsen bir başkası şifreni öğrenmiş demektir. Derhal yeni bir şifre belirlemeni öneririz!**"
+			},
+			"account_locked": {
+				"subject": "Vikunja hesabını güvenlik nedeniyle kilitledik",
+				"message": "Birisi giriş bilgilerinle oturum açmaya çalıştı ancak geçerli bir TOTP kodu giremedi.",
+				"disabled": "Üst üste 10 başarısız denemenin ardından hesabını kilitledik ve şifreni sıfırladık. Yeni bir şifre belirlemek için az önce gönderdiğimiz e-postadaki yönergeleri izleyebilirsin.",
+				"reset_instructions": "Şifre sıfırlama e-postası ulaşmadıysa [%[1]s](%[2]s) adresinden her zaman yeni bir talep oluşturabilirsin."
+			}
+		},
+		"login": {
+			"failed": {
+				"subject": "Birisi Vikunja hesabına girmeye çalıştı ancak şifreyi bilemedi",
+				"message": "Birisi hesabına art arda 3 kez yanlış şifreyle giriş yapmayı denedi.",
+				"warning": "Bu denemeleri sen yapmadıysan bir başkası hesabına sızmaya çalışıyor olabilir.",
+				"enhance_security": "Hesap güvenliğini artırmak için daha güçlü bir şifre seçebilir ya da ayarlardan iki adımlı doğrulamayı (TOTP) etkinleştirebilirsin:"
+			}
+		},
+		"account": {
+			"deletion": {
+				"confirm": {
+					"subject": "Lütfen Vikunja hesabının silinmesini onayla",
+					"request": "Hesabının silinmesi yönünde bir talep aldık. İşlemi onaylamak için lütfen aşağıdaki bağlantıya tıkla:",
+					"valid_duration": "Bu bağlantı 24 saat boyunca geçerlidir.",
+					"schedule_info": "Silme işlemini onayladığında hesabın 3 gün sonrasına planlanacak; bu süre zarfında sana durumla ilgili bir e-posta daha göndereceğiz.",
+					"consequences": "Silme işlemine devam edersen oluşturduğun tüm projeler ve görevler silinir. Başka kullanıcılar veya ekiplerle paylaştığın tüm içeriklerin sahipliği ise onlara devredilir.",
+					"changed_mind": "Böyle bir talepte bulunmadıysan ya da fikrini değiştirdiysen bu e-postayı görmezden gelebilirsin."
+				},
+				"scheduled": {
+					"subject_days": "Vikunja hesabın %[1]s gün içinde silinecek",
+					"subject_tomorrow": "Vikunja hesabın yarın silinecek",
+					"request_reminder": "Kısa süre önce Vikunja hesabının silinmesi için talepte bulunmuştun.",
+					"deletion_time_days": "Hesabını %[1]s gün sonra kalıcı olarak sileceğiz.",
+					"deletion_time_tomorrow": "Hesabını yarın kalıcı olarak sileceğiz.",
+					"changed_mind": "Fikrinden vazgeçtiysen silme işlemini iptal etmek için aşağıdaki bağlantıya tıklayıp adımları takip etmen yeterli:"
+				},
+				"completed": {
+					"subject": "Vikunja hesabın silindi",
+					"confirmation": "Talebin üzerine Vikunja hesabını sildik.",
+					"permanent": "Bu işlem geri alınamaz. Yedek almadıysan ve verilerine hemen ulaşman gerekiyorsa sunucu yöneticinle görüşmelisin."
+				}
+			}
+		},
+		"task": {
+			"reminder": {
+				"subject": "\"%[1]s\" görevi için hatırlatma (%[2]s)",
+				"message": "\"%[1]s\" (%[2]s) görevin için küçük bir hatırlatma."
+			},
+			"comment": {
+				"subject": "Ynt: %[1]s (%[2]s)",
+				"mentioned_subject": "%[1]s, \"%[2]s\" görevindeki bir yorumda senden bahsetti (%[3]s)"
+			},
+			"assigned": {
+				"subject_to_assignee": "\"%[1]s\" görevi sana atandı (%[2]s)",
+				"message_to_assignee": "%[1]s, \"%[2]s\" görevini sana verdi.",
+				"subject_to_others": "\"%[1]s\" (%[2]s) görevi %[3]s kişisine atandı",
+				"message_to_others": "%[1]s bu görevi %[2]s adlı kullanıcıya devretti.",
+				"subject_to_others_self": "\"%[1]s\" (%[2]s) görevini %[3]s kendi üstlendi",
+				"message_to_others_self": "%[1]s bu görevi kendi üzerine aldı."
+			},
+			"deleted": {
+				"subject": "\"%[1]s\" görevi silindi (%[2]s)",
+				"message": "%[1]s, \"%[2]s\" (%[3]s) görevini sildi."
+			},
+			"created": {
+				"subject": "\"%[1]s\" görevi oluşturuldu (%[2]s)",
+				"message": "%[1]s yeni bir görev oluşturdu: \"%[2]s\" (%[3]s)"
+			},
+			"mentioned": {
+				"subject_new": "%[1]s, yeni bir görevde (\"%[2]s\") senden bahsetti (%[3]s)",
+				"subject": "%[1]s, \"%[2]s\" görevinde senden bahsetti (%[3]s)"
+			},
+			"overdue": {
+				"subject": "\"%[1]s\" görevinin süresi geçti (%[2]s)",
+				"message": "\"%[1]s\" (%[2]s) görevinin teslim tarihi %[3]s doldu ve henüz tamamlanmadı.",
+				"multiple_subject": "Günü geçen görevlerin var",
+				"multiple_message": "Teslim tarihi geçen görevlerin şunlar:",
+				"assigned_heading": "Sana atananlar",
+				"followed_heading": "Takip ettiğin görevler",
+				"overdue_since": "%[1]s süredir gecikmiş",
+				"overdue_now": "az önce süresi doldu",
+				"overdue": "%[1]s gecikmede"
+			}
+		},
+		"project": {
+			"created": "%[1]s, \"%[2]s\" projesini oluşturdu"
+		},
+		"team": {
+			"member_added": {
+				"subject": "%[1]s seni Vikunja'daki \"%[2]s\" ekibine ekledi",
+				"message": "%[1]s az önce seni Vikunja üzerindeki %[2]s ekibine dahil etti."
+			}
+		},
+		"data_export": {
+			"ready": {
+				"subject": "Vikunja dışa aktarma dosyan hazır",
+				"message": "Vikunja verilerin indirilmeye hazır! Dosyanı hemen almak için aşağıdaki butona tıkla:",
+				"availability": "İndirme bağlantısı önümüzdeki 7 gün boyunca geçerli kalacak."
+			}
+		},
+		"migration": {
+			"done": {
+				"subject": "%[1]s platformundan Vikunja'ya aktarım tamamlandı",
+				"imported": "Vikunja; %[1]s üzerinde erişebildiğin tüm listeleri, projeleri, görevleri, notları, hatırlatıcıları ve dosyaları başarıyla içeri aktardı.",
+				"have_fun": "Yeni (ama tanıdık) projelerinin keyfini çıkar!"
+			},
+			"failed": {
+				"subject": "%[1]s platformundan Vikunja'ya aktarım yapılamadı",
+				"message": "%[1]s üzerinden yapılan taşıma işlemi bu kez ne yazık ki planlandığı gibi gitmedi.",
+				"retry": "Hiç dert etme! Daha önce yaptığın gibi baştan başlatıp bir şans daha ver. Bazen %[1]s tarafındaki anlık aksaklıklar yüzünden böyle pürüzler çıkabiliyor; genelde tekrar denemek işi çözer.",
+				"error": "Yolda ufak bir hataya takıldık: `%[2]s`.",
+				"report": "Neyin ters gittiğini inceleyebilmemiz için [forumumuzda](https://community.vikunja.io/) ya da diğer iletişim kanallarımızda bize haber verirsen çok seviniriz.",
+				"working_on_it": "Hata zaten radarımızda; sorunu en kısa sürede çözmek için kolları sıvadık."
+			}
+		},
+		"api_token": {
+			"expiring": {
+				"week": {
+					"subject": "\"%[1]s\" API anahtarının süresi yakında doluyor",
+					"message": "\"%[1]s\" API anahtarının süresi %[2]s tarihinde (%[3]s sonra) dolacak. Bu anahtara ihtiyacın sürüyorsa süresi bitmeden yenisini oluşturmayı unutma."
+				},
+				"day": {
+					"subject": "\"%[1]s\" API anahtarının süresi yarın doluyor",
+					"message": "\"%[1]s\" API anahtarının süresi %[2]s tarihinde (%[3]s sonra) dolacak. Bu anahtara ihtiyacın sürüyorsa süresi bitmeden yenisini oluşturmayı unutma."
+				},
+				"action": "API Anahtarlarını Yönet"
+			}
+		},
+		"common": {
+			"have_nice_day": "Güzel bir gün dileriz!",
+			"copy_url": "Yukarıdaki buton çalışmıyorsa aşağıdaki bağlantıyı kopyalayıp tarayıcının adres çubuğuna yapıştırabilirsin:",
+			"actions": {
+				"open_task": "Görevi Vikunja'da Aç",
+				"open_vikunja": "Vikunja'yı Aç",
+				"open_project": "Projeyi Aç",
+				"open_team": "Ekibi Aç",
+				"download": "İndir",
+				"reset_password": "Şifreni Sıfırla",
+				"go_to_settings": "Ayarlara Git",
+				"confirm_email": "E-posta Adresini Doğrula",
+				"abort_deletion": "Silme İşleminden Vazgeç",
+				"confirm_account_deletion": "Hesabımı Silmeyi Onayla",
+				"change_notification_settings_link": "Bildirim tercihlerini [buradan](%[1]s) değiştirebilirsin.",
+				"left_comment": "%[1]s bir yorum bıraktı",
+				"mentioned_you_comment": "%[1]s bir yorumda senden bahsetti",
+				"mentioned_you": "%[1]s senden bahsetti",
+				"mentioned_you_new_task": "%[1]s yeni bir görevde senden bahsetti"
+			}
+		}
+	},
+	"time": {
+		"since_years": "bir yıl|%[1]d yıl",
+		"since_weeks": "bir hafta|%[1]d hafta",
+		"since_days": "bir gün|%[1]d gün",
+		"since_hours": "bir saat|%[1]d saat",
+		"since_minutes": "bir dakika|%[1]d dakika",
+		"list_last_separator": "ve"
+	},
+	"feeds": {
+		"notifications": {
+			"title": "%[1]s için Vikunja bildirimleri"
+		}
+	}
+}

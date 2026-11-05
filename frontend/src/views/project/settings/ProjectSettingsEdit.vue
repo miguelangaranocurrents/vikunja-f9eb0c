@@ -1,0 +1,157 @@
+<template>
+	<CreateEdit
+		v-model:loading="loadingModel"
+		:title="$t('project.edit.header')"
+		primary-icon=""
+		:primary-label="$t('misc.save')"
+		:primary-disabled="Boolean(loadError)"
+		:tertiary="project.max_permission === PERMISSIONS.ADMIN ? $t('misc.delete') : undefined"
+		@primary="save"
+		@tertiary="$router.push({ name: 'project.settings.delete', params: { projectId } })"
+	>
+		<ErrorMessage v-if="loadError" />
+		<template v-else>
+			<FormField
+				id="title"
+				v-model="project.title"
+				v-focus
+				:label="$t('project.title')"
+				:disabled="isLoading"
+				:placeholder="$t('project.edit.titlePlaceholder')"
+				type="text"
+				@keyup.enter="save"
+			/>
+			<FormField :label="$t('project.parent')">
+				<ProjectSearch
+					:model-value="parentProject"
+					@update:modelValue="setParentProject"
+				/>
+			</FormField>
+			<FormField :label="$t('project.edit.description')">
+				<Editor
+					id="projectdescription"
+					v-model="project.description"
+					:class="{ 'disabled': isLoading}"
+					:disabled="isLoading"
+					:placeholder="$t('project.edit.descriptionPlaceholder')"
+				/>
+			</FormField>
+
+			<div class="columns">
+				<div class="column">
+					<FormField
+						id="identifier"
+						v-model="project.identifier"
+						v-tooltip="$t('project.edit.identifierTooltip')"
+						:label="$t('project.edit.identifier')"
+						:disabled="isLoading"
+						:placeholder="$t('project.edit.identifierPlaceholder')"
+						type="text"
+						maxlength="10"
+						@keyup.enter="save"
+					/>
+				</div>
+
+				<div class="column">
+					<FormField :label="$t('project.edit.color')">
+						<ColorPicker v-model="project.hex_color" />
+					</FormField>
+				</div>
+			</div>
+		</template>
+	</CreateEdit>
+</template>
+
+<script setup lang="ts">
+import {computed, ref, watch} from 'vue'
+import {useI18n} from 'vue-i18n'
+
+import Editor from '@/components/input/AsyncEditor'
+import ColorPicker from '@/components/input/ColorPicker.vue'
+import CreateEdit from '@/components/misc/CreateEdit.vue'
+import FormField from '@/components/input/FormField.vue'
+import ProjectSearch from '@/components/tasks/partials/ProjectSearch.vue'
+import ErrorMessage from '@/components/misc/Error.vue'
+
+import type {ProjectResponse} from '@/client/queries/projects'
+import {useUpdateProjectMutation} from '@/client/queries/projects'
+
+import {useBaseStore} from '@/stores/base'
+import {useProjects} from '@/composables/useProjects'
+import {useProject} from '@/composables/useProject'
+import {useGoBack} from '@/composables/useGoBack'
+
+import {useTitle} from '@/composables/useTitle'
+import {PERMISSIONS} from '@/constants/permissions'
+
+const props = defineProps<{
+	projectId: number,
+}>()
+
+defineOptions({name: 'ProjectSettingEdit'})
+
+const goBack = useGoBack()
+const projectList = useProjects()
+
+const {t} = useI18n({useScope: 'global'})
+
+const {project, isLoaded, isLoading, error: loadError} = useProject(() => props.projectId)
+const updateProject = useUpdateProjectMutation(t('project.edit.success'))
+
+const parentProject = ref<ProjectResponse | null>(null)
+const parentProjectChanged = ref(false)
+const isSaving = ref(false)
+
+const loadingModel = computed({
+	get: () => isSaving.value || isLoading.value,
+	set(value: boolean) {
+		isSaving.value = value
+	},
+})
+watch(
+	() => [
+		props.projectId,
+		project.value.id,
+		projectList.projects[project.value.parent_project_id],
+	] as const,
+	([projectId, loadedProjectId, parent], previous) => {
+		if (projectId !== previous?.[0] || projectId !== loadedProjectId) {
+			parentProjectChanged.value = false
+			parentProject.value = null
+		}
+		if (projectId !== loadedProjectId) {
+			return
+		}
+		if (!parentProjectChanged.value) {
+			parentProject.value = parent ?? null
+		}
+	},
+	{immediate: true},
+)
+
+function setParentProject(parent: ProjectResponse | null) {
+	parentProject.value = parent
+	parentProjectChanged.value = true
+}
+
+useTitle(() => project.value.title ? t('project.edit.title', {project: project.value.title}) : '')
+
+async function save() {
+	if (isSaving.value || !isLoaded.value) {
+		return
+	}
+
+	isSaving.value = true
+
+	try {
+		if (parentProjectChanged.value) {
+			project.value.parent_project_id = parentProject.value?.id ?? 0
+		}
+		await updateProject.mutateAsync(project.value)
+		useBaseStore().setCurrentProject(project.value)
+		goBack()
+	} finally {
+		isSaving.value = false
+	}
+}
+</script>

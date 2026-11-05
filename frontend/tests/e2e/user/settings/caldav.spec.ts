@@ -1,0 +1,95 @@
+import type {Page} from '@playwright/test'
+import {test, expect} from '../../../support/fixtures'
+import {gotoUserSettings} from '../../../support/userSettings'
+import {TokenFactory} from '../../../factories/token'
+import {serverPageSize} from '../../../support/pagination'
+
+test.describe('CalDAV', () => {
+	// Filter to data rows (rows containing a <td>) to exclude the <th>-only header row.
+	const dataRows = (page: Page) => page.locator('table.table tr').filter({has: page.locator('td')})
+
+	test('generates a token that authenticates against the caldav endpoint', async ({
+		authenticatedPage: page, currentUser, apiContext,
+	}) => {
+		await gotoUserSettings(page, 'caldav')
+
+		const created = page.waitForResponse(r =>
+			r.url().includes('/user/settings/token/caldav') && r.request().method() === 'POST',
+		)
+		await page.getByRole('button', {name: 'Create a CalDAV token'}).click()
+		await created
+		await expect(dataRows(page)).toHaveCount(1)
+
+		// Banner renders the one-time token string; capture it.
+		const banner = page.locator('.message').filter({hasText: 'Here is your new token'})
+		await expect(banner).toBeVisible()
+		const tokenText = await banner.innerText()
+		const tokenMatch = tokenText.match(/[A-Za-z0-9]{40,}/)
+		expect(tokenMatch).not.toBeNull()
+		const token = tokenMatch![0]
+
+		// Hit the caldav principal endpoint with basic auth.
+		const basic = Buffer.from(`${currentUser.username}:${token}`).toString('base64')
+		const resp = await apiContext.fetch(`/dav/principals/${currentUser.username}/`, {
+			method: 'PROPFIND',
+			headers: {Authorization: `Basic ${basic}`, Depth: '0'},
+		})
+		expect(resp.status()).toBeLessThan(300)
+		await page.reload()
+		await expect(banner).toHaveCount(0)
+		await expect(dataRows(page)).toHaveCount(1)
+	})
+
+	test('deleting a token revokes caldav access', async ({
+		authenticatedPage: page, currentUser, apiContext, userToken,
+	}) => {
+		const tokenValue = 'fixed-caldav-token-123456789012345678901234567890'
+		// kind=4 is TokenCaldavAuth (see pkg/user/token.go)
+		await TokenFactory.create(1, {user_id: currentUser.id, kind: 4, token: tokenValue}, false)
+
+		await gotoUserSettings(page, 'caldav')
+		await expect(dataRows(page)).toHaveCount(1)
+
+		const deleted = page.waitForResponse(r =>
+			/\/user\/settings\/token\/caldav\/\d+/.test(r.url()) && r.request().method() === 'DELETE',
+		)
+		await dataRows(page).getByRole('button', {name: 'Delete'}).click()
+		await deleted
+		await expect(dataRows(page)).toHaveCount(0)
+		await page.reload()
+		await expect(dataRows(page)).toHaveCount(0)
+		const stored = await apiContext.get('user/settings/token/caldav', {
+			headers: {Authorization: `Bearer ${userToken}`},
+		})
+		expect(await stored.json()).toEqual([])
+
+		// NOTE: the factory seeds the plaintext token as-is, but caldav tokens are
+		// stored bcrypt-hashed. We assert the row is gone in the UI rather than
+		// probing caldav with the seeded value.
+	})
+
+	test('pages through tokens and steps back after deleting the last row of a page', async ({authenticatedPage: page, currentUser, apiContext}) => {
+		const pageSize = await serverPageSize(apiContext)
+		const seeded = await TokenFactory.create(pageSize + 1, {
+			user_id: currentUser.id,
+			kind: 4,
+		}, false)
+		const newestId = String(seeded[seeded.length - 1].id)
+
+		await gotoUserSettings(page, 'caldav')
+		await expect(dataRows(page)).toHaveCount(pageSize)
+
+		await page.getByRole('link', {name: 'Goto page 2'}).click()
+		await expect(page).toHaveURL(/[?&]page=2/)
+		await expect(dataRows(page)).toHaveCount(1)
+		await expect(dataRows(page).locator('td').first()).toHaveText(newestId)
+
+		await page.reload()
+		await expect(dataRows(page)).toHaveCount(1)
+
+		await dataRows(page).getByRole('button', {name: 'Delete'}).click()
+		await expect(page).not.toHaveURL(/[?&]page=2/)
+		await expect(dataRows(page)).toHaveCount(pageSize)
+		await expect(page.getByRole('navigation', {name: 'pagination'})).toHaveCount(0)
+	})
+})

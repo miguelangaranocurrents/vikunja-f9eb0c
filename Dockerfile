@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+FROM --platform=$BUILDPLATFORM node:24.21.0-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS frontendbuilder
+
+WORKDIR /build
+
+ENV PNPM_CACHE_FOLDER=.cache/pnpm/
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV CYPRESS_INSTALL_BINARY=0
+
+COPY frontend/pnpm-lock.yaml frontend/package.json frontend/pnpm-workspace.yaml ./
+RUN npm install -g corepack && corepack enable && \
+    pnpm install --frozen-lockfile
+COPY frontend/ ./
+ARG RELEASE_VERSION=dev
+RUN echo "{\"VERSION\": \"${RELEASE_VERSION/-g/-}\"}" > src/version.json && pnpm run build
+
+FROM --platform=$BUILDPLATFORM ghcr.io/techknowlogick/xgo:go-1.27.x@sha256:7d5cab968132bf21285686bde17e902e0af080a16d08b439deb7265b276ac6f9 AS apibuilder
+
+RUN go install github.com/magefile/mage@latest && \
+    mv /go/bin/mage /usr/local/go/bin
+
+WORKDIR /go/src/code.vikunja.io/api
+COPY . ./
+COPY --from=frontendbuilder /build/dist ./frontend/dist
+
+ARG TARGETOS TARGETARCH TARGETVARIANT RELEASE_VERSION
+ENV RELEASE_VERSION=$RELEASE_VERSION
+
+RUN export PATH=$PATH:$GOPATH/bin && \
+	mage build:clean && \
+    (cd build && mage release:xgo vikunja "${TARGETOS}/${TARGETARCH}/${TARGETVARIANT}")
+
+RUN mkdir -p /tmp && chmod 1777 /tmp
+
+#  ┬─┐┬ ┐┌┐┐┌┐┐┬─┐┬─┐
+#  │┬┘│ │││││││├─ │┬┘
+#  ┘└┘┘─┘┘└┘┘└┘┴─┘┘└┘
+
+# The actual image
+FROM scratch
+
+LABEL org.opencontainers.image.authors='maintainers@vikunja.io'
+LABEL org.opencontainers.image.url='https://vikunja.io'
+LABEL org.opencontainers.image.documentation='https://vikunja.io/docs'
+LABEL org.opencontainers.image.source='https://code.vikunja.io/vikunja'
+LABEL org.opencontainers.image.licenses='AGPLv3'
+LABEL org.opencontainers.image.title='Vikunja'
+
+WORKDIR /app/vikunja
+ENTRYPOINT [ "/app/vikunja/vikunja" ]
+EXPOSE 3456
+
+COPY --from=apibuilder --chown=1000:1000 --chmod=1777 /tmp /tmp
+
+USER 1000
+
+ENV VIKUNJA_SERVICE_ROOTPATH=/app/vikunja/
+ENV VIKUNJA_DATABASE_PATH=/db/vikunja.db
+
+COPY --from=apibuilder /build/vikunja-* vikunja
+COPY --from=apibuilder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

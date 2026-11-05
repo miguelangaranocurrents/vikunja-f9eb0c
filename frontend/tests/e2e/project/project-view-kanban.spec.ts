@@ -1,0 +1,588 @@
+import {readFile} from 'node:fs/promises'
+import {test, expect} from '../../support/fixtures'
+import {BucketFactory} from '../../factories/bucket'
+import {ProjectFactory} from '../../factories/project'
+import {TaskFactory} from '../../factories/task'
+import {ProjectViewFactory} from '../../factories/project_view'
+import {TaskBucketFactory} from '../../factories/task_buckets'
+import {createTasksWithPriorities, createTasksWithSearch} from '../../support/filterTestHelpers'
+import {updateUserSettings} from '../../support/updateUserSettings'
+
+async function createSingleTaskInBucket(count = 1, attrs = {}) {
+	const projects = await ProjectFactory.create(1)
+	const views = await ProjectViewFactory.create(1, {
+		id: 1,
+		project_id: projects[0].id,
+		view_kind: 3,
+		bucket_configuration_mode: 1,
+	})
+	const buckets = await BucketFactory.create(2, {
+		project_view_id: views[0].id,
+	})
+	const tasks = await TaskFactory.create(count, {
+		project_id: projects[0].id,
+		...attrs,
+	})
+	await TaskBucketFactory.create(1, {
+		task_id: tasks[0].id,
+		bucket_id: buckets[0].id,
+		project_view_id: views[0].id,
+	})
+	return {
+		task: tasks[0],
+		view: views[0],
+		project: projects[0],
+	}
+}
+
+async function createTaskWithBuckets(buckets, count = 1) {
+	const data = await TaskFactory.create(count, {
+		project_id: 1,
+	})
+	for (const t of data) {
+		await TaskBucketFactory.create(1, {
+			task_id: t.id,
+			bucket_id: buckets[0].id,
+			project_view_id: buckets[0].project_view_id,
+		}, false)
+	}
+
+	return data
+}
+
+test.describe('Project View Kanban', () => {
+	let buckets
+
+	test.beforeEach(async ({authenticatedPage: page}) => {
+		const projects = await ProjectFactory.create(1)
+		await ProjectViewFactory.create(1, {
+			id: 4,
+			project_id: projects[0].id,
+			view_kind: 3,
+			bucket_configuration_mode: 1,
+		})
+		buckets = await BucketFactory.create(2, {
+			project_view_id: 4,
+		})
+	})
+
+	test('Loads card covers only once they scroll into view', async ({authenticatedPage: page, apiContext, userToken}) => {
+		const tasks = await createTaskWithBuckets(buckets, 20)
+		const image = await readFile('tests/fixtures/image-blue.png')
+		const coverIds: number[] = []
+		for (const task of tasks) {
+			const upload = await apiContext.put(`tasks/${task.id}/attachments`, {
+				multipart: {
+					files: {
+						name: 'cover.png',
+						mimeType: 'image/png',
+						buffer: image,
+					},
+				},
+				headers: {Authorization: `Bearer ${userToken}`},
+			})
+			expect(upload.ok()).toBe(true)
+			coverIds.push((await upload.json()).success[0].id)
+		}
+		await TaskFactory.create(tasks.length, {
+			cover_image_attachment_id: (i: number) => coverIds[i - 1],
+		})
+
+		const coverRequests = new Map<number, number>()
+		page.on('request', request => {
+			const url = new URL(request.url())
+			const taskId = url.pathname.match(/\/api\/v2\/tasks\/(\d+)\/attachments\/\d+\/preview$/)?.[1]
+			if (taskId && url.searchParams.get('size') === 'lg') {
+				coverRequests.set(Number(taskId), (coverRequests.get(Number(taskId)) ?? 0) + 1)
+			}
+		})
+		const everyCoverOnce = new Map(tasks.map(task => [task.id, 1]))
+
+		await page.setViewportSize({
+			width: 1280,
+			height: 500,
+		})
+		await page.goto('/projects/1/4')
+
+		const cards = page.locator('.kanban .bucket .tasks .task')
+		await expect(cards).toHaveCount(tasks.length)
+		await expect(cards.first().locator('img')).toBeVisible()
+		expect(coverRequests.size).toBeGreaterThan(0)
+		expect(coverRequests.size).toBeLessThan(tasks.length)
+
+		// Jumping straight to the bottom would skip the cards in between.
+		for (let i = 0; i < tasks.length; i++) {
+			await cards.nth(i).scrollIntoViewIfNeeded()
+			await expect(cards.nth(i).locator('img')).toBeVisible()
+		}
+		expect(coverRequests).toEqual(everyCoverOnce)
+	})
+
+	test('Shows all buckets with their tasks', async ({authenticatedPage: page}) => {
+		const data = await createTaskWithBuckets(buckets, 10)
+		await page.goto('/projects/1/4')
+
+		await expect(page.locator('.kanban .bucket .title').filter({hasText: buckets[0].title})).toBeVisible()
+		await expect(page.locator('.kanban .bucket .title').filter({hasText: buckets[1].title})).toBeVisible()
+		await expect(page.locator('.kanban .bucket').first()).toContainText(data[0].title)
+	})
+
+	test('Can add a new task to a bucket', async ({authenticatedPage: page}) => {
+		await createTaskWithBuckets(buckets, 2)
+		await page.goto('/projects/1/4')
+
+		await page.locator('.kanban .bucket').filter({hasText: buckets[0].title}).locator('.bucket-footer .button').filter({hasText: 'Add another task'}).click()
+		await page.locator('.kanban .bucket').filter({hasText: buckets[0].title}).locator('.bucket-footer .field .control input.input').fill('New Task')
+		await page.locator('.kanban .bucket').filter({hasText: buckets[0].title}).locator('.bucket-footer .field .control input.input').press('Enter')
+
+		await expect(page.locator('.kanban .bucket').first()).toContainText('New Task')
+	})
+
+	test('Can create a new bucket', async ({authenticatedPage: page}) => {
+		await page.goto('/projects/1/4')
+
+		await page.locator('.kanban .bucket.new-bucket .button').click()
+		await page.locator('.kanban .bucket.new-bucket input.input').fill('New Bucket')
+		await page.locator('.kanban .bucket.new-bucket input.input').press('Enter')
+
+		await expect(page.locator('.kanban .bucket .title').filter({hasText: 'New Bucket'})).toBeVisible()
+	})
+
+	test('Can set a bucket limit', async ({authenticatedPage: page}) => {
+		await page.goto('/projects/1/4')
+
+		const bucketDropdown = page.locator('.kanban .bucket .bucket-header .dropdown.options').first()
+		await bucketDropdown.locator('.dropdown-trigger').click()
+		await bucketDropdown.locator('.dropdown-menu .dropdown-item').filter({hasText: 'Limit: Not Set'}).click()
+		await bucketDropdown.locator('.dropdown-menu .field input.input').fill('3')
+		await bucketDropdown.locator('.dropdown-menu .field .control .button').click()
+
+		// Wait for the limit to be saved - the dropdown closes and limit is shown
+		await expect(page.locator('.global-notification')).toContainText('Success')
+		await expect(page.locator('.kanban .bucket .bucket-header span.limit').first()).toBeVisible()
+		await expect(page.locator('.kanban .bucket .bucket-header span.limit').first()).toContainText('/3')
+	})
+
+	test('Can rename a bucket', async ({authenticatedPage: page}) => {
+		await page.goto('/projects/1/4')
+
+		const titleElement = page.locator('.kanban .bucket .bucket-header .title').first()
+		await titleElement.click()
+		await titleElement.fill('New Bucket Title')
+		await titleElement.press('Enter')
+		await expect(titleElement).toContainText('New Bucket Title')
+	})
+
+	test('Can delete a bucket', async ({authenticatedPage: page}) => {
+		await page.goto('/projects/1/4')
+
+		await page.locator('.kanban .bucket .bucket-header .dropdown.options .dropdown-trigger').first().click()
+		await page.locator('.kanban .bucket .bucket-header .dropdown.options .dropdown-menu .dropdown-item').filter({hasText: 'Delete'}).click()
+		await expect(page.locator('dialog[open] .modal-content .modal-header')).toContainText('Delete the bucket')
+		await page.locator('dialog[open] .modal-content .actions .button').filter({hasText: 'Do it!'}).click()
+
+		await expect(page.locator('.kanban .bucket .title').filter({hasText: buckets[0].title})).not.toBeVisible()
+		await expect(page.locator('.kanban .bucket .title').filter({hasText: buckets[1].title})).toBeVisible()
+	})
+
+	test('Can drag tasks around', async ({authenticatedPage: page}) => {
+		const tasks = await createTaskWithBuckets(buckets, 2)
+		await page.goto('/projects/1/4')
+
+		const sourceTask = page.locator('.kanban .bucket .tasks .task').filter({hasText: tasks[0].title}).first()
+		const targetBucket = page.locator('.kanban .bucket:nth-child(2) .tasks')
+		await sourceTask.dragTo(targetBucket)
+
+		await expect(page.locator('.kanban .bucket:nth-child(2) .tasks')).toContainText(tasks[0].title)
+		await expect(page.locator('.kanban .bucket:nth-child(1) .tasks')).not.toContainText(tasks[0].title)
+		await page.reload()
+		await expect(page.locator('.kanban .bucket:nth-child(2) .tasks')).toContainText(tasks[0].title)
+	})
+
+	test('Scrolls the board while dragging a task to a bucket off screen', async ({authenticatedPage: page}) => {
+		const moreBuckets = await BucketFactory.create(6, {
+			id: (i: number) => buckets.length + i,
+			project_view_id: 4,
+		}, false)
+		const lastBucket = moreBuckets[moreBuckets.length - 1]
+		const tasks = await createTaskWithBuckets(buckets)
+		await page.goto('/projects/1/4')
+		await expect(page.locator(`.kanban .bucket[data-bucket-id="${lastBucket.id}"]`)).toBeAttached()
+		await page.waitForLoadState('networkidle')
+
+		const board = page.locator('.kanban')
+		const boardBox = await board.boundingBox()
+		const taskBox = await page.locator('.kanban .bucket .tasks .task').filter({hasText: tasks[0].title}).first().boundingBox()
+		const nearRightEdge = {x: boardBox!.x + boardBox!.width - 60, y: boardBox!.y + boardBox!.height / 2}
+
+		await page.mouse.move(taskBox!.x + 20, taskBox!.y + 10)
+		await page.mouse.down()
+		await page.mouse.move(nearRightEdge.x, nearRightEdge.y, {steps: 20})
+		await expect.poll(async () => {
+			await page.mouse.move(nearRightEdge.x + 1, nearRightEdge.y)
+			await page.mouse.move(nearRightEdge.x, nearRightEdge.y)
+			return board.evaluate(el => el.scrollLeft + el.clientWidth >= el.scrollWidth - 1)
+		}, {timeout: 10000}).toBe(true)
+
+		const lastBucketTasks = page.locator(`.kanban .bucket[data-bucket-id="${lastBucket.id}"] .tasks`)
+		const targetBox = await lastBucketTasks.boundingBox()
+		await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + 10, {steps: 10})
+		await page.mouse.up()
+
+		await expect(lastBucketTasks).toContainText(tasks[0].title)
+		await page.reload()
+		await expect(page.locator(`.kanban .bucket[data-bucket-id="${lastBucket.id}"] .tasks`)).toContainText(tasks[0].title)
+	})
+
+	test('Recurring task dropped on done bucket moves back to the default bucket', async ({authenticatedPage: page}) => {
+		// Reproduces https://github.com/go-vikunja/vikunja/issues/2618
+		const projects = await ProjectFactory.create(1)
+		await ProjectViewFactory.create(1, {
+			id: 10,
+			project_id: projects[0].id,
+			view_kind: 3,
+			bucket_configuration_mode: 1,
+			done_bucket_id: 2,
+		})
+		const localBuckets = await BucketFactory.create(2, {
+			id: '{increment}',
+			project_view_id: 10,
+		})
+
+		const tomorrow = new Date()
+		tomorrow.setDate(tomorrow.getDate() + 1)
+		const tasks = await TaskFactory.create(1, {
+			id: 100,
+			project_id: projects[0].id,
+			title: 'Recurring Task',
+			repeat_after: 604800,
+			repeat_mode: 2,
+			due_date: tomorrow.toISOString(),
+		})
+		await TaskBucketFactory.create(1, {
+			task_id: tasks[0].id,
+			bucket_id: localBuckets[0].id,
+			project_view_id: 10,
+		})
+
+		await page.goto(`/projects/${projects[0].id}/10`)
+
+		const sourceTask = page.locator('.kanban .bucket .tasks .task').filter({hasText: tasks[0].title}).first()
+		const doneBucket = page.locator('.kanban .bucket:nth-child(2) .tasks')
+		await sourceTask.dragTo(doneBucket)
+
+		// After the drop, the backend's recurrence redirect must be honored in the UI:
+		// the card appears back in the first (default/backlog) bucket with no refresh.
+		await expect(page.locator('.kanban .bucket:nth-child(1) .tasks')).toContainText(tasks[0].title)
+		await expect(page.locator('.kanban .bucket:nth-child(2) .tasks')).not.toContainText(tasks[0].title)
+	})
+
+	test('Should navigate to the task when the task card is clicked', async ({authenticatedPage: page}) => {
+		const tasks = await createTaskWithBuckets(buckets, 5)
+		await page.goto('/projects/1/4')
+
+		await expect(page.locator('.kanban .bucket .tasks .task').filter({hasText: tasks[0].title})).toBeVisible()
+		await page.locator('.kanban .bucket .tasks .task').filter({hasText: tasks[0].title}).click()
+
+		await expect(page).toHaveURL(new RegExp(`/tasks/${tasks[0].id}`), {timeout: 1000})
+	})
+
+	test('Should mark a task done when ctrl-clicking its card', async ({authenticatedPage: page, apiContext, userToken}) => {
+		const [task] = await createTaskWithBuckets(buckets, 1)
+		await page.goto('/projects/1/4')
+
+		const card = page.locator('.kanban .bucket .tasks .task').filter({hasText: task.title}).first()
+		await expect(card).toBeVisible()
+
+		const update = page.waitForResponse(r =>
+			new URL(r.url()).pathname.endsWith(`/tasks/${task.id}`) && r.request().method() === 'PATCH',
+		)
+		// The title link stops ctrl-click propagation, so click the card body.
+		await card.locator('.task-id').click({modifiers: ['ControlOrMeta']})
+		expect((await update).ok()).toBeTruthy()
+
+		await expect(card.locator('.kanban-card__done')).toBeVisible()
+		await expect(page).toHaveURL(/\/projects\/1\/4/)
+
+		const stored = await apiContext.get(`tasks/${task.id}`, {
+			headers: {Authorization: `Bearer ${userToken}`},
+		})
+		expect(stored.ok()).toBe(true)
+		expect((await stored.json()).done).toBe(true)
+	})
+
+	test('Marks a task done and moves its card into the done bucket', async ({authenticatedPage: page, apiContext, userToken}) => {
+		const headers = {Authorization: `Bearer ${userToken}`}
+		const [project] = await ProjectFactory.create(1)
+		const [view] = await ProjectViewFactory.create(1, {
+			id: 20,
+			project_id: project.id,
+			view_kind: 3,
+			bucket_configuration_mode: 1,
+			done_bucket_id: 2,
+		})
+		const localBuckets = await BucketFactory.create(2, {
+			id: '{increment}',
+			project_view_id: view.id,
+		})
+		const [task] = await TaskFactory.create(1, {
+			id: 100,
+			project_id: project.id,
+			title: 'Ctrl click to done',
+			done: false,
+		})
+		await TaskBucketFactory.create(1, {
+			task_id: task.id,
+			bucket_id: localBuckets[0].id,
+			project_view_id: view.id,
+		})
+
+		await page.goto(`/projects/${project.id}/${view.id}`)
+
+		const sourceBucket = page.locator('.kanban .bucket:nth-child(1) .tasks')
+		const doneBucket = page.locator('.kanban .bucket:nth-child(2) .tasks')
+		const card = page.locator('.kanban .bucket .tasks .task').filter({hasText: task.title}).first()
+		await expect(card).toBeVisible()
+		await expect(sourceBucket).toContainText(task.title)
+
+		const update = page.waitForResponse(r =>
+			new URL(r.url()).pathname.endsWith(`/tasks/${task.id}`) && r.request().method() === 'PATCH',
+		)
+		// The title link stops ctrl-click propagation, so click the card body.
+		await card.locator('.task-id').click({modifiers: ['ControlOrMeta']})
+		expect((await update).ok()).toBeTruthy()
+
+		await expect(doneBucket).toContainText(task.title)
+		await expect(sourceBucket).not.toContainText(task.title)
+
+		await page.reload()
+		await expect(doneBucket).toContainText(task.title)
+		await expect(sourceBucket).not.toContainText(task.title)
+
+		const stored = await apiContext.get(`tasks/${task.id}`, {headers})
+		expect(stored.ok()).toBe(true)
+		expect((await stored.json()).done).toBe(true)
+
+		const board = await apiContext.get(`/api/v2/projects/${project.id}/views/${view.id}/buckets/tasks`, {headers})
+		expect(board.ok()).toBeTruthy()
+		const holdingBucket = (await board.json()).items
+			.find(bucket => (bucket.tasks ?? []).some(item => item.id === task.id))
+		expect(holdingBucket?.id).toBe(localBuckets[1].id)
+	})
+
+	test('Should remove a task from the kanban board when moving it to another project', async ({authenticatedPage: page}) => {
+		const projects = await ProjectFactory.create(2)
+		const views = await ProjectViewFactory.create(2, {
+			project_id: '{increment}',
+			view_kind: 3,
+			bucket_configuration_mode: 1,
+		})
+		await BucketFactory.create(2)
+		const tasks = await TaskFactory.create(5, {
+			id: '{increment}',
+			project_id: 1,
+		})
+		await TaskBucketFactory.create(5, {
+			project_view_id: 1,
+		})
+		const task = tasks[0]
+		await page.goto('/projects/1/' + views[0].id)
+
+		await expect(page.locator('.kanban .bucket .tasks .task').filter({hasText: task.title})).toBeVisible()
+		await page.locator('.kanban .bucket .tasks .task').filter({hasText: task.title}).click()
+
+		await page.locator('.task-view .action-buttons .button', {timeout: 3000}).filter({hasText: /^Move$/}).click()
+		const multiselectInput = page.locator('.task-view .content.details .field .multiselect.control .input-wrapper input')
+		await expect(multiselectInput).toBeVisible({timeout: 5000})
+		await multiselectInput.click()
+		await multiselectInput.pressSequentially(projects[1].title)
+		// Wait for search results to appear before clicking
+		const searchResults = page.locator('.task-view .content.details .field .multiselect.control .search-results')
+		await searchResults.waitFor({state: 'visible'})
+		await searchResults.locator('> *').first().click()
+
+		await expect(page.locator('.global-notification')).toContainText('Success', {timeout: 1000})
+		await page.goBack()
+		const bucketCount = await page.locator('.kanban .bucket').count()
+		for (let i = 0; i < bucketCount; i++) {
+			await expect(page.locator('.kanban .bucket').nth(i)).not.toContainText(task.title)
+		}
+	})
+
+	test('Shows a button to filter the kanban board', async ({authenticatedPage: page}) => {
+		await page.goto('/projects/1/4')
+
+		await expect(page.locator('.project-kanban .filter-container .base-button')).toBeVisible()
+	})
+
+	test('Should remove a task from the board when deleting it', async ({authenticatedPage: page}) => {
+		const {task, view} = await createSingleTaskInBucket(5)
+		await page.goto(`/projects/1/${view.id}`)
+
+		await expect(page.locator('.kanban .bucket .tasks .task').filter({hasText: task.title})).toBeVisible()
+		await page.locator('.kanban .bucket .tasks .task').filter({hasText: task.title}).click()
+		await expect(page.locator('.task-view .action-buttons .button').filter({hasText: 'Delete'})).toBeVisible()
+		await page.locator('.task-view .action-buttons .button').filter({hasText: 'Delete'}).click()
+		await expect(page.locator('dialog[open] .modal-content .modal-header')).toContainText('Delete this task')
+		await page.locator('dialog[open] .modal-content .actions .button').filter({hasText: 'Do it!'}).click()
+
+		await expect(page.locator('.global-notification')).toContainText('Success')
+
+		await page.goBack()
+		const bucketCount = await page.locator('.kanban .bucket').count()
+		for (let i = 0; i < bucketCount; i++) {
+			await expect(page.locator('.kanban .bucket').nth(i)).not.toContainText(task.title)
+		}
+	})
+
+	test('Should show a task description icon if the task has a description', async ({authenticatedPage: page}) => {
+		const {task, view} = await createSingleTaskInBucket(1, {
+			description: 'Lorem Ipsum',
+		})
+		const loadTasksPromise = page.waitForResponse(response =>
+			response.url().includes('/projects/1/views/') && response.url().includes('/tasks'),
+		)
+
+		await page.goto(`/projects/${task.project_id}/${view.id}`)
+		await loadTasksPromise
+
+		await expect(page.locator('.bucket .tasks .task .footer .icon svg')).toBeVisible()
+	})
+
+	test('Should not show a task description icon if the task has an empty description', async ({authenticatedPage: page}) => {
+		const {task, view} = await createSingleTaskInBucket(1, {
+			description: '',
+		})
+		const loadTasksPromise = page.waitForResponse(response =>
+			response.url().includes('/projects/1/views/') && response.url().includes('/tasks'),
+		)
+
+		await page.goto(`/projects/${task.project_id}/${view.id}`)
+		await loadTasksPromise
+
+		await expect(page.locator('.bucket .tasks .task .footer .icon svg')).not.toBeVisible()
+	})
+
+	test('Should not show a task description icon if the task has a description containing only an empty p tag', async ({authenticatedPage: page}) => {
+		const {task, view} = await createSingleTaskInBucket(1, {
+			description: '<p></p>',
+		})
+		const loadTasksPromise = page.waitForResponse(response =>
+			response.url().includes('/projects/1/views/') && response.url().includes('/tasks'),
+		)
+
+		await page.goto(`/projects/${task.project_id}/${view.id}`)
+		await loadTasksPromise
+
+		await expect(page.locator('.bucket .tasks .task .footer .icon svg')).not.toBeVisible()
+	})
+
+	test('Should respect filter query parameter from URL', async ({authenticatedPage: page}) => {
+		// Create buckets first
+		const projects = await ProjectFactory.create(1)
+		const views = await ProjectViewFactory.create(1, {
+			id: 4,
+			project_id: 1,
+			view_kind: 3,
+			bucket_configuration_mode: 1,
+		})
+		const buckets = await BucketFactory.create(2, {
+			project_view_id: 4,
+		})
+
+		const {highPriorityTasks, lowPriorityTasks} = await createTasksWithPriorities(buckets)
+
+		await page.goto('/projects/1/4?filter=priority%20>=%204')
+
+		await expect(page).toHaveURL(/filter=priority/)
+
+		// Wait for tasks to load and verify high priority tasks are visible
+		await expect(page.locator('.kanban')).toContainText(highPriorityTasks[0].title, {timeout: 10000})
+		await expect(page.locator('.kanban')).toContainText(highPriorityTasks[1].title)
+
+		// Verify low priority tasks are not visible
+		await expect(page.locator('.kanban')).not.toContainText(lowPriorityTasks[0].title)
+		await expect(page.locator('.kanban')).not.toContainText(lowPriorityTasks[1].title)
+	})
+
+	test('Should respect search query parameter from URL', async ({authenticatedPage: page}) => {
+		// Create buckets first
+		const projects = await ProjectFactory.create(1)
+		const views = await ProjectViewFactory.create(1, {
+			id: 4,
+			project_id: 1,
+			view_kind: 3,
+			bucket_configuration_mode: 1,
+		})
+		const buckets = await BucketFactory.create(2, {
+			project_view_id: 4,
+		})
+
+		const {searchableTask} = await createTasksWithSearch(buckets)
+
+		await page.goto('/projects/1/4?s=meeting')
+
+		await expect(page).toHaveURL(/s=meeting/)
+
+		// Wait for search results to load and verify searchable task is visible
+		await expect(page.locator('.kanban')).toContainText(searchableTask.title, {timeout: 10000})
+
+		await expect(page.locator('.kanban .task')).toHaveCount(1)
+	})
+
+	test('Should not show task count by default when bucket has no limit', async ({authenticatedPage: page}) => {
+		await createTaskWithBuckets(buckets, 5)
+		await page.goto('/projects/1/4')
+
+		// Wait for buckets to load
+		await expect(page.locator('.kanban .bucket .title').filter({hasText: buckets[0].title})).toBeVisible()
+
+		// Verify the task count span is not visible when no limit is set
+		await expect(page.locator('.kanban .bucket .bucket-header span.limit').first()).not.toBeVisible()
+	})
+
+	test('Should show task count when alwaysShowBucketTaskCount setting is enabled', async ({authenticatedPage: page, apiContext, userToken}) => {
+		await createTaskWithBuckets(buckets, 5)
+
+		// Enable the alwaysShowBucketTaskCount setting
+		await updateUserSettings(apiContext, userToken, {
+			frontend_settings: {
+				always_show_bucket_task_count: true,
+			},
+		})
+
+		await page.goto('/projects/1/4')
+
+		// Wait for buckets to load
+		await expect(page.locator('.kanban .bucket .title').filter({hasText: buckets[0].title})).toBeVisible()
+
+		// Verify the task count is shown (without limit, just the count)
+		const limitSpan = page.locator('.kanban .bucket .bucket-header span.limit').first()
+		await expect(limitSpan).toBeVisible()
+		// Should show just the count (5) without a limit
+		await expect(limitSpan).toContainText('5')
+		// Should not contain a slash (no limit set)
+		await expect(limitSpan).not.toContainText('/')
+	})
+
+	test('Should show count/limit format when bucket has a limit set', async ({authenticatedPage: page}) => {
+		// Create tasks in the bucket
+		await createTaskWithBuckets(buckets, 2)
+		await page.goto('/projects/1/4')
+
+		// Set a bucket limit
+		const bucketDropdown = page.locator('.kanban .bucket .bucket-header .dropdown.options').first()
+		await bucketDropdown.locator('.dropdown-trigger').click()
+		await bucketDropdown.locator('.dropdown-menu .dropdown-item').filter({hasText: 'Limit: Not Set'}).click()
+		await bucketDropdown.locator('.dropdown-menu .field input.input').fill('10')
+		await bucketDropdown.locator('.dropdown-menu .field .control .button').click()
+
+		// Wait for the limit to be saved
+		await expect(page.locator('.global-notification')).toContainText('Success')
+
+		// Verify the count/limit format is shown (2/10)
+		const limitSpan = page.locator('.kanban .bucket .bucket-header span.limit').first()
+		await expect(limitSpan).toBeVisible()
+		await expect(limitSpan).toContainText('2/10')
+	})
+})

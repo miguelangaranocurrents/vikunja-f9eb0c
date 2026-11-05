@@ -1,0 +1,81 @@
+// Vikunja is a to-do list application to facilitate your life.
+// Copyright 2018-present Vikunja and contributors. All rights reserved.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package user
+
+import (
+	"code.vikunja.io/api/pkg/db"
+
+	"xorm.io/xorm"
+)
+
+func GenerateNewCaldavToken(u *User) (token *Token, err error) {
+	s := db.NewSession()
+	defer s.Close()
+
+	token, err = generateHashedToken(s, u, TokenCaldavAuth)
+	if err != nil {
+		_ = s.Rollback()
+		return nil, err
+	}
+
+	if err = s.Commit(); err != nil {
+		return nil, err
+	}
+
+	return token, nil
+}
+
+func GetCaldavTokens(u *User) (tokens []*Token, err error) {
+	s := db.NewSession()
+	defer s.Close()
+
+	return getTokensForKind(s, u, TokenCaldavAuth)
+}
+
+// GetCaldavTokensPage returns one 1-based page of the user's CalDAV tokens, oldest first, and their total count.
+func GetCaldavTokensPage(u *User, page, perPage int) (tokens []*Token, total int64, err error) {
+	s := db.NewSession()
+	defer s.Close()
+
+	tokens = []*Token{}
+	total, err = s.
+		Where("kind = ? AND user_id = ?", TokenCaldavAuth, u.ID).
+		OrderBy("id ASC").
+		Limit(perPage, (page-1)*perPage).
+		FindAndCount(&tokens)
+	return
+}
+
+// GetCaldavTokensWithSession is like GetCaldavTokens but uses an existing
+// database session instead of creating a new one. This avoids nested sessions
+// which cause deadlocks with SQLite's single-writer model.
+func GetCaldavTokensWithSession(s *xorm.Session, u *User) (tokens []*Token, err error) {
+	return getTokensForKind(s, u, TokenCaldavAuth)
+}
+
+func DeleteCaldavTokenByID(u *User, id int64) error {
+	s := db.NewSession()
+	defer s.Close()
+
+	err := removeTokenByID(s, u, TokenCaldavAuth, id)
+	if err != nil {
+		_ = s.Rollback()
+		return err
+	}
+
+	return s.Commit()
+}
