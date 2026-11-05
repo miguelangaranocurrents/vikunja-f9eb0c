@@ -152,7 +152,7 @@
 					{{ $t('misc.save') }}
 				</BaseButton>
 			</li>
-			<li v-if="!isEditing">
+			<li v-if="!isEditing && isEditEnabled">
 				<BaseButton
 					class="done-edit"
 					@click="() => setEdit()"
@@ -200,6 +200,7 @@ import Mention from '@tiptap/extension-mention'
 
 import {taskLinkCurrentProjectIdKey} from './taskLinkContext'
 import {createEditorExtensions} from './editorExtensions'
+import {serializeClipboardText} from './clipboardText'
 import mentionSuggestionSetup from './mention/mentionSuggestion'
 import MentionUser from './mention/MentionUser.vue'
 import ImageLightbox from '@/components/misc/ImageLightbox.vue'
@@ -353,6 +354,7 @@ const editor = useEditor({
 		attributes: {
 			'aria-label': props.placeholder || t('input.editor.label'),
 		},
+		clipboardTextSerializer: (slice, view) => serializeClipboardText(slice, view.state.schema),
 	},
 	parseOptions: {
 		preserveWhitespace: true,
